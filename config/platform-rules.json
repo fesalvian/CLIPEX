@@ -1,0 +1,53 @@
+{
+  "instagram": {
+    "label": "Instagram",
+    "product": "Instagram Reels",
+    "textLabel": "Legenda",
+    "maxChars": 2200,
+    "hasTitle": false,
+    "hashtags": { "min": 3, "max": 5, "required": [] },
+    "maxVideoSec": 90,
+    "delivery": "Posta direto no horário",
+    "tip": "Máximo de 5 hashtags por post. Aqui a legenda pesa mais: gancho na primeira linha e uma pergunta pra puxar comentário.",
+    "guidance": [
+      "Primeira linha é o gancho: curta, curiosa, sem hashtag.",
+      "Inclua uma pergunta direta pro público comentar.",
+      "Feche chamando pra live (ex.: 'live todo dia, link na bio').",
+      "No máximo 5 hashtags, específicas do momento e do jogo."
+    ]
+  },
+  "tiktok": {
+    "label": "TikTok",
+    "product": "TikTok",
+    "textLabel": "Legenda",
+    "maxChars": 4000,
+    "hasTitle": false,
+    "hashtags": { "min": 3, "max": 5, "required": [] },
+    "maxVideoSec": 600,
+    "delivery": "Vai como rascunho, você confirma no app",
+    "tip": "O TikTok funciona como busca: a legenda leva as palavras que as pessoas pesquisam. 3 a 5 hashtags bem específicas rendem mais que muitas genéricas.",
+    "guidance": [
+      "Escreva como alguém pesquisaria esse momento (nome do jogo, situação, emoção).",
+      "Frases naturais, sem encher de emoji.",
+      "3 a 5 hashtags específicas; evite só genéricas como #fyp."
+    ]
+  },
+  "youtube": {
+    "label": "Shorts",
+    "product": "YouTube Shorts",
+    "textLabel": "Descrição",
+    "maxChars": 5000,
+    "hasTitle": true,
+    "titleMax": 100,
+    "hashtags": { "min": 3, "max": 5, "required": ["#shorts"], "ignoredAbove": 60 },
+    "maxVideoSec": 180,
+    "delivery": "Agenda direto no YouTube",
+    "tip": "As 3 primeiras hashtags aparecem acima do título. Use poucas: com mais de 60 o YouTube ignora todas. O título faz o trabalho pesado.",
+    "guidance": [
+      "Título de até 100 caracteres com exatamente uma hashtag no fim.",
+      "O título faz o trabalho pesado: descreva o momento de forma curiosa.",
+      "Descrição curta chamando pro canal.",
+      "3 a 5 hashtags na descrição, incluindo #shorts."
+    ]
+  }
+}

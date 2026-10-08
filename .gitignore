@@ -1,0 +1,17 @@
+node_modules/
+out/
+dist/
+release/
+*.log
+*.tsbuildinfo
+
+# segredos
+.env
+.env.*
+!.env.example
+
+# modelos e binários baixados (scripts/setup-models.mjs)
+vendor/
+
+# dados locais de teste
+.data/
