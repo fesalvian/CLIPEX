@@ -8,11 +8,14 @@ import { componentStatus, downloadComponent } from './components'
 import { clipsRepo, projectsRepo } from './db'
 import { env, setEnv } from './env'
 import { exportClip, exportZip } from './export'
-import { suggestTimes } from './learning'
+import { bestSlots, suggestTimes } from './learning'
+import { addExample, listExamples, removeExample } from './style'
 import { listModels } from './llm'
 import { loudnessBuckets } from './analysis/loudness'
 import { ensureDir, isDev, userDataDir } from './paths'
-import { enqueueAnalysis, makePreview, processClip, readFloat32, reanalyze, retryAnalysis } from './pipeline'
+import { enqueueAnalysis, ensureCoverage, loudnessOf, makePreview, processClip, reanalyze, retryAnalysis } from './pipeline'
+import { importFonts, listFonts, removeFont } from './fonts'
+import { trimTransparent } from './image'
 import { cancelPost, clients, planSchedule, schedulePosts } from './posting/scheduler'
 import { applyDictionaryToClip, generateCaptions, generateHooks, prepareClips } from './prepare'
 import { createProject, deleteProject, listSummaries, saveProject } from './projects'
@@ -79,6 +82,12 @@ export function registerIpc(): void {
     markProjectStale(id)
     return saveProject(p)
   })
+  handle('projects:set-game', (id, game) => {
+    const p = projectsRepo.get(id)
+    if (!p) throw new Error('Projeto não encontrado')
+    p.game = game.trim() || null
+    return saveProject(p)
+  })
   handle('projects:open-folder', (id) => {
     const p = projectsRepo.get(id)
     if (p) void shell.openPath(existsSync(join(p.dir, 'renders')) ? join(p.dir, 'renders') : p.dir)
@@ -86,7 +95,12 @@ export function registerIpc(): void {
 
   // ---------- cortes ----------
   handle('clips:list', (projectId) => clipsRepo.byProject(projectId))
-  handle('clips:update', (id, patch) => updateClip(id, patch))
+  handle('clips:update', (id, patch) => {
+    const c = updateClip(id, patch)
+    // corte arrastado pra fora do que já tem preview/transcrição: gera o que falta
+    if (patch.cutIn !== undefined || patch.cutOut !== undefined || patch.winStart !== undefined) ensureCoverage(id)
+    return c
+  })
   handle('clips:create-manual', (projectId, at) => {
     const c = createManualClip(projectId, at)
     void processClip(c.id)
@@ -98,13 +112,12 @@ export function registerIpc(): void {
     if (c) emit('clip:removed', { id, projectId: c.projectId })
   })
   handle('clips:loudness', (projectId, from, to, buckets) => {
-    const p = projectsRepo.get(projectId)
-    const file = p ? join(p.dir, 'loudness.f32') : ''
-    if (!p || !existsSync(file)) return { from, to, values: [] }
-    return { from, to, values: loudnessBuckets(readFloat32(file), from, to, buckets) }
+    const series = loudnessOf(projectId)
+    if (!series) return { from, to, values: [] }
+    return { from, to, values: loudnessBuckets(series, from, to, buckets) }
   })
   handle('clips:ensure-preview', async (id) => {
-    const c = await makePreview(id)
+    const c = await makePreview(id, { priority: true })
     if (!c) throw new Error('Corte não encontrado')
     return c
   })
@@ -135,6 +148,10 @@ export function registerIpc(): void {
   handle('posts:list', (projectId) => postsRepo.all(projectId))
   handle('posts:cancel', (id) => cancelPost(id))
   handle('posts:suggest-time', () => suggestTimes())
+  handle('posts:slots', (perDay) => bestSlots(Math.max(1, Math.min(10, perDay))))
+  handle('style:list', () => listExamples())
+  handle('style:add', (ex) => addExample(ex))
+  handle('style:remove', (id) => removeExample(id))
   handle('posts:connect', async (network) => {
     try {
       await clients[network].connect()
@@ -160,13 +177,28 @@ export function registerIpc(): void {
     const next = updateSettings(patch)
     if (patch.watchFolder !== undefined && patch.watchFolder !== before.watchFolder) resetWatchSince()
     if (patch.watchFolder !== undefined || patch.watchEnabled !== undefined) startWatcher()
-    if (patch.watermark) {
-      // marca d'água global mudou: renders que usam a global ficam velhos
-      for (const p of projectsRepo.all()) {
-        for (const c of clipsRepo.byProject(p.id)) if (!c.watermark && c.render.status === 'done') markProjectStale(p.id)
-      }
+    if (patch.watermark || patch.text) {
+      // padrão global mudou (marca d'água ou textos): renders prontos ficam velhos
+      for (const p of projectsRepo.all()) markProjectStale(p.id)
     }
     return next
+  })
+
+  handle('fonts:list', () => listFonts())
+  handle('fonts:import', async () => {
+    const w = win()
+    const opts = {
+      title: 'Importar fontes',
+      properties: ['openFile' as const, 'multiSelections' as const],
+      filters: [{ name: 'Fontes', extensions: ['ttf', 'otf'] }]
+    }
+    const r = w ? await dialog.showOpenDialog(w, opts) : await dialog.showOpenDialog(opts)
+    if (r.canceled) return { added: [], rejected: [] }
+    return importFonts(r.filePaths)
+  })
+  handle('fonts:remove', (family) => {
+    removeFont(family)
+    return listFonts()
   })
   handle('settings:set-openai-key', (key) => setEnv('OPENAI_API_KEY', key))
   handle('settings:has-openai-key', () => env('OPENAI_API_KEY').length > 0)
@@ -179,13 +211,12 @@ export function registerIpc(): void {
     if (r.canceled || !file) return null
     const img = nativeImage.createFromPath(file)
     if (img.isEmpty()) throw new Error('Não consegui ler esse PNG.')
-    const { width, height } = img.getSize()
-    // copia pra pasta do app: o arquivo original pode sumir
-    const dest = join(ensureDir(join(userDataDir(), 'assets')), `watermark_${Date.now()}${extname(file).toLowerCase()}`)
-    copyFileSync(file, dest)
+    // copia pra pasta do app (o original pode sumir) já sem a borda transparente
+    const dest = join(ensureDir(join(userDataDir(), 'assets')), `watermark_${Date.now()}.png`)
+    const size = await trimTransparent(file, dest, { w: img.getSize().width, h: img.getSize().height })
     const s = getSettings().watermark
-    const wmW = Math.min(width, Math.max(120, s.w))
-    const next: Watermark = { ...s, enabled: true, path: dest, imgW: width, imgH: height, w: wmW, x: Math.max(0, 1080 - wmW - 46) }
+    const wmW = Math.min(size.w, Math.max(120, s.w))
+    const next: Watermark = { ...s, enabled: true, path: dest, imgW: size.w, imgH: size.h, w: wmW }
     return next
   })
   handle('dialog:pick-folder', async (initial) => {

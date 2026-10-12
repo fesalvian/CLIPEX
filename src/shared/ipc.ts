@@ -5,6 +5,7 @@ import type {
   ComponentKey,
   ComponentStatus,
   CropLayout,
+  FontInfo,
   LlmProvider,
   Network,
   Post,
@@ -12,6 +13,7 @@ import type {
   ProjectSummary,
   ScheduleSuggestion,
   Settings,
+  StyleExample,
   SubtitleCue,
   VodDownload,
   WatcherStatus,
@@ -24,11 +26,16 @@ export type ClipPatch = Partial<
     Clip,
     | 'cutIn'
     | 'cutOut'
+    | 'winStart'
+    | 'winEnd'
     | 'approved'
     | 'layout'
     | 'camSplit'
     | 'hookChoice'
     | 'hookCustom'
+    | 'hookOff'
+    | 'captionStyle'
+    | 'hookStyle'
     | 'zoomEnabled'
     | 'zoomAt'
     | 'cues'
@@ -40,10 +47,13 @@ export type ClipPatch = Partial<
 export interface ScheduleRequest {
   clipIds: string[]
   networks: Network[]
-  /** null = postar agora */
+  /** null = começar agora (o primeiro corte sai na hora) */
   firstAt: string | null
-  /** um corte por dia a partir de firstAt */
-  spreadDaily: boolean
+  /**
+   * null = todos no mesmo horário; 1 = um por dia (no horário de firstAt, ou no melhor
+   * horário de cada rede se for "agora"); n = n por dia nos melhores horários de cada rede
+   */
+  perDay: number | null
 }
 
 export interface SchedulePreviewItem {
@@ -83,6 +93,7 @@ export interface IpcApi {
   'projects:reanalyze': (id: string) => void
   'projects:retry': (id: string) => void
   'projects:set-crop': (id: string, crop: CropLayout, saveAsPreset: boolean) => Project
+  'projects:set-game': (id: string, game: string) => Project
   'projects:open-folder': (id: string) => void
 
   'clips:list': (projectId: string) => Clip[]
@@ -110,6 +121,8 @@ export interface IpcApi {
   'posts:list': (projectId: string | null) => Post[]
   'posts:cancel': (postId: string) => Post
   'posts:suggest-time': () => ScheduleSuggestion[]
+  /** melhores horários de cada rede pra n cortes por dia */
+  'posts:slots': (perDay: number) => Record<Network, string[]>
   'posts:connect': (network: Network) => { ok: boolean; error: string | null }
   'posts:connections': () => Record<Network, { connected: boolean; account: string | null }>
 
@@ -121,6 +134,14 @@ export interface IpcApi {
   'watermark:pick': () => Watermark | null
   'dialog:pick-folder': (initial: string | null) => string | null
   'dialog:pick-video': () => string | null
+
+  'style:list': () => StyleExample[]
+  'style:add': (ex: Omit<StyleExample, 'id' | 'createdAt'>) => StyleExample[]
+  'style:remove': (id: string) => StyleExample[]
+
+  'fonts:list': () => FontInfo[]
+  'fonts:import': () => { added: FontInfo[]; rejected: string[] }
+  'fonts:remove': (family: string) => FontInfo[]
 
   'components:status': () => ComponentStatus[]
   'components:download': (key: ComponentKey) => void

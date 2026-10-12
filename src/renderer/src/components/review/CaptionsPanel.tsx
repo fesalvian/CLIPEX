@@ -158,16 +158,36 @@ export function CaptionsPanel({ clip, rules, accounts, provider }: Props) {
         </div>
       )}
 
-      <button
-        className="btn sm"
-        onClick={() => {
-          const body = rule.hasTitle ? `${title}\n\n${fullCaptionText(draft)}` : fullCaptionText(draft)
-          void call('clipboard:write', body).then(() => toast('success', 'Legenda e hashtags copiadas.'))
-        }}
-      >
-        <Icon name="copy" size={14} />
-        Copiar legenda e hashtags
-      </button>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 8 }}>
+        <button
+          className="btn sm"
+          onClick={() => {
+            const body = rule.hasTitle ? `${title}\n\n${fullCaptionText(draft)}` : fullCaptionText(draft)
+            void call('clipboard:write', body).then(() => toast('success', 'Legenda e hashtags copiadas.'))
+          }}
+        >
+          <Icon name="copy" size={14} />
+          Copiar
+        </button>
+        <button
+          className="btn sm"
+          disabled={!text.trim()}
+          title="A IA passa a usar esta legenda como referência de como você escreve"
+          onClick={() =>
+            void call('style:add', {
+              kind: 'caption',
+              network: tab,
+              text,
+              title: rule.hasTitle ? title : undefined,
+              hashtags: cap.hashtags,
+              source: 'manual'
+            }).then(() => toast('success', 'Guardada como exemplo do seu jeito de escrever.'))
+          }
+        >
+          <Icon name="sparkle" size={14} />
+          Guardar como exemplo
+        </button>
+      </div>
     </div>
   )
 }

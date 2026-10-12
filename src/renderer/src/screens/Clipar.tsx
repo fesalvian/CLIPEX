@@ -9,17 +9,21 @@ import { Icon, PauseIcon, PlayIcon } from '../components/Icon'
 import { ManualClipModal } from '../components/ManualClipModal'
 import { Preview916 } from '../components/Preview916'
 import { WatermarkPanel } from '../components/WatermarkPanel'
+import { TextsPanel } from '../components/TextsPanel'
+import type { TextKind, TextPatch } from '../components/TextLayer'
 import { Waveform } from '../components/Waveform'
 import { usePreviewPlayer, type Player } from '../lib/player'
-import { clipLabel, clipList, clipScore, useStore } from '../store'
+import { clipLabel, clipList, clipScore, useStore, type LiveWave } from '../store'
+import { captionStyleFor, hookStyleFor, hookTextFor } from '@shared/text'
 
-type Filter = 'all' | 'laugh' | 'scream' | 'peak'
+type Filter = 'all' | 'laugh' | 'scream' | 'peak' | 'manual'
 
 const FILTERS: { key: Filter; label: string }[] = [
   { key: 'all', label: 'Todos' },
   { key: 'laugh', label: 'Risadas' },
   { key: 'scream', label: 'Gritos' },
-  { key: 'peak', label: 'Picos de áudio' }
+  { key: 'peak', label: 'Picos de áudio' },
+  { key: 'manual', label: 'Manuais' }
 ]
 
 export const TAG_INFO: Record<DetectedTag, { label: string; color: string }> = {
@@ -47,15 +51,22 @@ export function projectSubtitle(p: Project | null): string {
 export function AnalysisBanner({ project }: { project: Project }) {
   if (project.status !== 'analyzing' && project.status !== 'queued') return null
   const running = STAGE_ORDER.find((k) => project.stages[k].status === 'running')
-  const done = STAGE_ORDER.filter((k) => k !== 'proxy' && (project.stages[k].status === 'done' || project.stages[k].status === 'skipped')).length
+  const done = STAGE_ORDER.filter(
+    (k) => k !== 'proxy' && (project.stages[k].status === 'done' || project.stages[k].status === 'skipped')
+  ).length
   const st = running ? project.stages[running] : null
   return (
     <div className="analysis-banner">
       <span className="spinner" />
       <div style={{ flexGrow: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
         <span style={{ fontSize: 13 }}>
-          {project.status === 'queued' ? 'Na fila pra análise' : `Analisando a live · ${running ? STAGE_LABEL[running] : 'preparando'}`}
-          <span className="muted"> · etapa {Math.min(done + 1, STAGE_ORDER.length - 1)} de {STAGE_ORDER.length - 1}</span>
+          {project.status === 'queued'
+            ? 'Na fila pra análise'
+            : `Analisando a live · ${running ? STAGE_LABEL[running] : 'preparando'}`}
+          <span className="muted">
+            {' '}
+            · etapa {Math.min(done + 1, STAGE_ORDER.length - 1)} de {STAGE_ORDER.length - 1}
+          </span>
         </span>
         <div className="progress">
           <span style={{ width: `${Math.round((st?.progress ?? 0) * 100)}%` }} />
@@ -70,23 +81,23 @@ function ClipRow({
   clip,
   selected,
   player,
-  wave,
+  live,
+  duration,
+  onSelect,
   onSelectPlay,
   onToggle
 }: {
   clip: Clip
   selected: boolean
   player: Player
-  wave: number[] | undefined
+  live: LiveWave | null
+  duration: number
+  onSelect: () => void
   onSelectPlay: () => void
   onToggle: () => void
 }) {
   const previewClip = useStore((s) => s.previewClip)
   const patchClip = useStore((s) => s.patchClip)
-  const loadWave = useStore((s) => s.loadWave)
-  useEffect(() => {
-    void loadWave(clip)
-  }, [clip.id, loadWave]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const isPlaying = selected && player.playing
   const busy = clip.stage === 'transcribing' || clip.stage === 'ranking' || (clip.stage === 'detected' && !clip.llm)
@@ -122,7 +133,9 @@ function ClipRow({
           ) : (
             <span
               className={`score${clip.llm ? '' : ' pending'}`}
-              title={clip.llm ? (clip.llm.reason || 'Nota de potencial da IA') : 'Nota provisória pelo áudio; a IA ainda vai avaliar'}
+              title={
+                clip.llm ? clip.llm.reason || 'Nota de potencial da IA' : 'Nota provisória pelo áudio; a IA ainda vai avaliar'
+              }
             >
               {busy && <span className="spinner" style={{ width: 10, height: 10 }} />}
               {clip.llm ? score : `~${score}`}
@@ -132,30 +145,41 @@ function ClipRow({
 
         <Waveform
           clip={clip}
-          wave={wave}
+          live={live}
+          duration={duration}
           selected={selected}
           time={selected ? player.time : null}
           onCutChange={(cutIn, cutOut, final) => {
+            if (!selected) onSelect()
             if (final) void patchClip(clip.id, { cutIn, cutOut })
             else previewClip(clip.id, { cutIn, cutOut })
           }}
+          onViewChange={(winStart, winEnd, final) => {
+            if (final) void patchClip(clip.id, { winStart, winEnd })
+            else previewClip(clip.id, { winStart, winEnd })
+          }}
           onSeek={(sec) => {
-            if (!selected) onSelectPlay()
-            else player.seek(sec)
+            if (!selected) onSelect()
+            player.seek(Math.max(clip.cutIn, Math.min(sec, clip.cutOut)))
           }}
         />
 
         <div className="clip-times mono">
           <span>{fmtClock(clip.winStart)}</span>
           <span style={{ color: 'var(--text-3)' }}>
-            corte: {fmtClock(clip.cutIn)} → {fmtClock(clip.cutOut)} · <span style={{ color: 'var(--violet-3)' }}>{fmtDur(clip.cutOut - clip.cutIn)}</span>
+            corte: {fmtClock(clip.cutIn)} → {fmtClock(clip.cutOut)} ·{' '}
+            <span style={{ color: 'var(--violet-3)' }}>{fmtDur(clip.cutOut - clip.cutIn)}</span>
           </span>
           <span>{fmtClock(clip.winEnd)}</span>
         </div>
       </div>
 
       <div className="clip-play">
-        <button className={`play-btn${isPlaying ? ' on' : ''}`} aria-label={isPlaying ? 'Pausar clipe' : 'Reproduzir clipe'} onClick={onSelectPlay}>
+        <button
+          className={`play-btn${isPlaying ? ' on' : ''}`}
+          aria-label={isPlaying ? 'Pausar clipe' : 'Reproduzir clipe'}
+          onClick={onSelectPlay}
+        >
           {isPlaying ? <PauseIcon /> : <PlayIcon />}
         </button>
       </div>
@@ -167,7 +191,8 @@ export function Clipar() {
   const project = useStore((s) => s.project)
   const clipsMap = useStore((s) => s.clips)
   const settings = useStore((s) => s.settings)
-  const waves = useStore((s) => s.waves)
+  const liveWave = useStore((s) => s.liveWave)
+  const loadLiveWave = useStore((s) => s.loadLiveWave)
   const patchClip = useStore((s) => s.patchClip)
   const openProject = useStore((s) => s.openProject)
   const toast = useStore((s) => s.toast)
@@ -179,14 +204,24 @@ export function Clipar() {
   const [presetOn, setPresetOn] = useState(true)
   const [manualOpen, setManualOpen] = useState(false)
   const [wmDraft, setWmDraft] = useState<Watermark | null>(null)
+  const [textDraft, setTextDraft] = useState<{ clipId: string; patch: Partial<Clip> } | null>(null)
 
   const clips = useMemo(() => clipList(clipsMap).sort((a, b) => clipScore(b) - clipScore(a) || a.number - b.number), [clipsMap])
-  const visible = clips.filter((c) => filter === 'all' || c.tags.includes(filter))
+  const visible = clips.filter(
+    (c) => filter === 'all' || c.tags.includes(filter) || (filter === 'manual' && c.origin === 'manual')
+  )
   const selected = (selId ? clipsMap[selId] : null) ?? visible[0] ?? null
   const approved = clips.filter((c) => c.approved)
   const totalSec = approved.reduce((n, c) => n + (c.cutOut - c.cutIn), 0)
 
-  const player = usePreviewPlayer(selected)
+  const player = usePreviewPlayer(selected, project?.proxyPath ?? null)
+  const duration = project?.source?.durationSec ?? 0
+
+  // waveform da live inteira (a timeline de cada corte recorta daqui e pode andar por ela)
+  const audioDone = project?.stages.audio.status === 'done'
+  useEffect(() => {
+    if (project && audioDone && duration > 0) void loadLiveWave(project.id, duration)
+  }, [project?.id, audioDone, duration, loadLiveWave]) // eslint-disable-line react-hooks/exhaustive-deps
   const autoPlay = useRef(false)
   useEffect(() => {
     if (autoPlay.current && player.ready) {
@@ -195,12 +230,10 @@ export function Clipar() {
     }
   }, [player.ready, player])
 
-  // corte sem preview (ex.: manual): pede pra gerar
+  // corte selecionado sem preview (ex.: manual): pede pra gerar, passando na frente do lote
   useEffect(() => {
-    if (selected && !selected.previewPath && project?.stages.previews.status !== 'running') {
-      void call('clips:ensure-preview', selected.id).catch(() => undefined)
-    }
-  }, [selected?.id, selected?.previewPath]) // eslint-disable-line react-hooks/exhaustive-deps
+    if (selected && player.loadingPreview) void call('clips:ensure-preview', selected.id).catch(() => undefined)
+  }, [selected?.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!project || !settings) {
     return (
@@ -216,6 +249,21 @@ export function Clipar() {
   }
 
   const effectiveWm: Watermark = wmDraft ?? selected?.watermark ?? settings.watermark
+  // enquanto arrasta um texto, o preview usa a posição provisória
+  const textClip = selected ? { ...selected, ...(textDraft?.clipId === selected.id ? textDraft.patch : {}) } : null
+  const capStyle = captionStyleFor(textClip ?? { captionStyle: null, layout: 'both', camSplit: 40 }, settings.text)
+  const hkStyle = hookStyleFor(textClip ?? { hookStyle: null }, settings.text)
+
+  const changeText = (c: Clip, kind: TextKind, tp: TextPatch, final: boolean): void => {
+    const patch: Partial<Clip> =
+      kind === 'caption' ? { captionStyle: { ...(c.captionStyle ?? {}), ...tp } } : { hookStyle: { ...(c.hookStyle ?? {}), ...tp } }
+    if (final) {
+      setTextDraft(null)
+      void patchClip(c.id, patch)
+    } else {
+      setTextDraft({ clipId: c.id, patch })
+    }
+  }
 
   const onSelectPlay = (c: Clip): void => {
     if (selected?.id === c.id) player.toggle()
@@ -239,7 +287,9 @@ export function Clipar() {
       return
     }
     setWmDraft(null)
-    if (selected) void patchClip(selected.id, { watermark: wm })
+    // a logo é a mesma em todos os cortes: mexer nela muda o padrão (a não ser que este
+    // corte tenha uma marca d'água própria de antes)
+    if (selected?.watermark) void patchClip(selected.id, { watermark: wm })
     else void updateSettings({ watermark: wm })
   }
 
@@ -250,10 +300,21 @@ export function Clipar() {
     toast('success', 'Marca d’água aplicada em todos os cortes (e salva como padrão).')
   }
 
+  // "usar" de todos os cortes visíveis (respeita o filtro)
+  const allOn = visible.length > 0 && visible.every((c) => c.approved)
+  const someOn = visible.some((c) => c.approved)
+  const toggleAll = (): void => {
+    const next = !allOn
+    for (const c of visible) if (c.approved !== next) void patchClip(c.id, { approved: next })
+  }
+
   const renderApproved = async (): Promise<void> => {
     if (approved.length === 0) return
     player.pause()
-    await call('clips:prepare', approved.map((c) => c.id))
+    await call(
+      'clips:prepare',
+      approved.map((c) => c.id)
+    )
     await openProject(project.id, 'revisar')
   }
 
@@ -289,7 +350,20 @@ export function Clipar() {
           )}
 
           <div className="list-head">
-            <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+              <label className="select-all" title={allOn ? 'Desmarcar todos' : 'Usar todos'}>
+                <input
+                  type="checkbox"
+                  checked={allOn}
+                  ref={(el) => {
+                    if (el) el.indeterminate = someOn && !allOn
+                  }}
+                  onChange={toggleAll}
+                  disabled={visible.length === 0}
+                  aria-label={allOn ? 'Desmarcar todos os cortes' : 'Usar todos os cortes'}
+                />
+                <span>todos</span>
+              </label>
               <h1>
                 {clips.length} {clips.length === 1 ? 'momento encontrado' : 'momentos encontrados'}
               </h1>
@@ -319,7 +393,9 @@ export function Clipar() {
               clip={c}
               selected={selected?.id === c.id}
               player={player}
-              wave={waves[c.id]}
+              live={liveWave?.projectId === project.id ? liveWave : null}
+              duration={duration}
+              onSelect={() => setSelId(c.id)}
               onSelectPlay={() => onSelectPlay(c)}
               onToggle={() => void patchClip(c.id, { approved: !c.approved })}
             />
@@ -331,7 +407,11 @@ export function Clipar() {
               Adicionar corte manual
             </button>
             <span style={{ fontSize: 14, color: 'var(--text-3)' }}>
-              {approved.length} de {clips.length} aprovados · <span className="mono" style={{ color: 'var(--violet-3)' }}>{fmtTotal(totalSec)}</span> no total
+              {approved.length} de {clips.length} aprovados ·{' '}
+              <span className="mono" style={{ color: 'var(--violet-3)' }}>
+                {fmtTotal(totalSec)}
+              </span>{' '}
+              no total
             </span>
           </div>
         </section>
@@ -346,12 +426,17 @@ export function Clipar() {
 
           <div style={{ alignSelf: 'center' }}>
             <Preview916
-              clip={selected}
+              clip={textClip}
               crop={project.crop}
               player={player}
               width={300}
+              captionStyle={capStyle}
+              hookStyle={hkStyle}
+              hookText={selected ? hookTextFor(selected, settings.text) : null}
+              dictionary={settings.dictionary}
               watermark={effectiveWm}
               onWatermarkChange={(wm, final) => setWatermark(wm, final)}
+              onTextChange={selected ? (kind, tp, final) => changeText(selected, kind, tp, final) : undefined}
             />
           </div>
 
@@ -359,9 +444,18 @@ export function Clipar() {
             <>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 <span className="label">Layout do corte</span>
-                <div className="seg" role="group" aria-label="Layout do corte" style={{ gridTemplateColumns: 'repeat(3, minmax(0, 1fr))' }}>
+                <div
+                  className="seg"
+                  role="group"
+                  aria-label="Layout do corte"
+                  style={{ gridTemplateColumns: 'repeat(3, minmax(0, 1fr))' }}
+                >
                   {LAYOUTS.map((l) => (
-                    <button key={l.key} aria-pressed={selected.layout === l.key} onClick={() => void patchClip(selected.id, { layout: l.key })}>
+                    <button
+                      key={l.key}
+                      aria-pressed={selected.layout === l.key}
+                      onClick={() => void patchClip(selected.id, { layout: l.key })}
+                    >
                       {l.label}
                     </button>
                   ))}
@@ -391,6 +485,7 @@ export function Clipar() {
           <div className="panel" style={{ gap: 10 }}>
             <CropEditor
               project={project}
+              player={player}
               showCam={selected?.layout !== 'game'}
               showGame={selected?.layout !== 'cam'}
               onCommit={(crop) => void commitCrop(crop)}
@@ -410,9 +505,12 @@ export function Clipar() {
             </label>
           </div>
 
+          {selected && <TextsPanel clip={selected} settings={settings} allClips={clips} />}
+
           <WatermarkPanel
             watermark={effectiveWm}
-            approvedCount={approved.length}
+            caption={capStyle}
+            overrides={clips.filter((c) => c.watermark).length}
             onChange={(wm) => setWatermark(wm)}
             onApplyAll={() => void applyWmAll()}
           />

@@ -94,14 +94,29 @@ export const projectsRepo = {
   }
 }
 
+/** Cortes salvos por versões anteriores ganham os campos novos com valores equivalentes. */
+export function upgradeClip(c: Clip): Clip {
+  const x = c as Clip & Partial<Clip>
+  x.hookOff ??= false
+  x.captionStyle ??= null
+  x.hookStyle ??= null
+  if (x.wordsFrom === undefined) x.wordsFrom = x.words ? x.winStart : null
+  if (x.wordsTo === undefined) x.wordsTo = x.words ? x.winEnd : null
+  if (x.previewEnd === undefined) x.previewEnd = x.previewPath ? x.winEnd + 2 : null
+  // marca d'água própria do corte salva antes do modo "acima da legenda": continua livre
+  if (x.watermark && x.watermark.anchor === undefined) x.watermark = { ...x.watermark, anchor: 'free', gap: 36, offsetX: 0 }
+  return x
+}
+
 export const clipsRepo = {
   get(id: string): Clip | null {
-    return parse<Clip>(db().prepare('SELECT data FROM clips WHERE id = ?').get(id))
+    const c = parse<Clip>(db().prepare('SELECT data FROM clips WHERE id = ?').get(id))
+    return c ? upgradeClip(c) : null
   },
   byProject(projectId: string): Clip[] {
-    return parseAll<Clip>(db().prepare('SELECT data FROM clips WHERE project_id = ?').all(projectId)).sort(
-      (a, b) => a.number - b.number
-    )
+    return parseAll<Clip>(db().prepare('SELECT data FROM clips WHERE project_id = ?').all(projectId))
+      .map(upgradeClip)
+      .sort((a, b) => a.number - b.number)
   },
   save(c: Clip): void {
     db()

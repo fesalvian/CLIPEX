@@ -79,12 +79,13 @@ a:hover {
   color: var(--violet-5);
 }
 
+/* A janela não rola: cada tela/coluna tem a própria rolagem. */
 .app {
-  min-height: 100%;
+  height: 100%;
   background: var(--bg-gradient);
-  background-attachment: fixed;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .mono {
@@ -118,10 +119,8 @@ a:hover {
   padding: 16px 28px;
   border-bottom: 1px solid var(--row-border);
   background: rgba(8, 10, 28, 0.55);
-  position: sticky;
-  top: 0;
+  flex-shrink: 0;
   z-index: 20;
-  backdrop-filter: blur(10px);
 }
 .brand {
   display: flex;

@@ -146,9 +146,26 @@ export const youtube: NetworkClient = {
       body: Readable.toWeb(stream) as ReadableStream,
       duplex: 'half'
     } as RequestInit & { duplex: 'half' })
-    const json = (await up.json().catch(() => ({}))) as { id?: string; error?: { message?: string } }
+    const json = (await up.json().catch(() => ({}))) as { id?: string; status?: { privacyStatus?: string }; error?: { message?: string } }
     if (!up.ok || !json.id) throw new Error(`Upload pro YouTube falhou: ${json.error?.message ?? up.status}`)
-    return { remoteId: json.id, url: `https://youtube.com/shorts/${json.id}`, draft: false, scheduledRemotely: !!input.publishAt }
+    // Projeto sem auditoria da API: o YouTube trava o vídeo como privado mesmo pedindo público.
+    let privacy = json.status?.privacyStatus
+    try {
+      const st = await api<{ items?: { status?: { privacyStatus?: string } }[] }>(`videos?part=status&id=${json.id}`)
+      privacy = st.items?.[0]?.status?.privacyStatus ?? privacy
+    } catch {
+      // sem leitura do status: fica com o que veio no upload
+    }
+    const lockedPrivate = !input.publishAt && privacy === 'private'
+    return {
+      remoteId: json.id,
+      url: `https://youtube.com/shorts/${json.id}`,
+      draft: false,
+      scheduledRemotely: !!input.publishAt,
+      note: lockedPrivate
+        ? 'Subiu como privado: o YouTube só libera público pra projetos que passaram pela auditoria da API. Dá pra tornar público no YouTube Studio.'
+        : undefined
+    }
   },
 
   async metrics(ids: string[]) {

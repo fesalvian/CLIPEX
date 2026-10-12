@@ -99,6 +99,13 @@ export interface SegmentConfig {
   encoder: VideoEncoder
 }
 
+/**
+ * Filtro dos vídeos leves: corta pra 30 fps ANTES de reduzir (metade dos quadros pra escalar)
+ * e usa o redimensionamento mais barato. Medido: 7,6 s contra 12,5 s num trecho de 94 s 1080p60.
+ * Decodificação por software: com -hwaccel cuda/auto ficou mais lento (17–22 s).
+ */
+export const LIGHT_VF = 'fps=30,scale=-2:360:flags=fast_bilinear'
+
 /** Trecho leve (360p) de um candidato, pra tocar na tela de clipar. */
 export function previewSegmentArgs(c: SegmentConfig): string[] {
   return [
@@ -109,7 +116,7 @@ export function previewSegmentArgs(c: SegmentConfig): string[] {
     '-i', c.src,
     '-map', '0:v:0',
     '-map', `0:a:${c.audioTrack}?`,
-    '-vf', 'scale=-2:360,fps=30',
+    '-vf', LIGHT_VF,
     ...videoCodecArgs(c.encoder, 'fast'),
     '-g', '15',
     '-c:a', 'aac', '-b:a', '96k', '-ac', '2',
@@ -130,17 +137,39 @@ export function proxyArgs(c: ProxyConfig): string[] {
   return [
     ...BASE,
     ...PROGRESS,
-    '-hwaccel', 'auto',
     '-i', c.src,
     '-map', '0:v:0',
     '-map', `0:a:${c.audioTrack}?`,
-    '-vf', 'scale=-2:360,fps=30',
+    '-vf', LIGHT_VF,
     ...videoCodecArgs(c.encoder, 'fast'),
     '-g', '30',
     '-c:a', 'aac', '-b:a', '64k', '-ac', '2',
     '-movflags', '+faststart',
     c.out
   ]
+}
+
+/**
+ * Cópia do vídeo final com bitrate menor pra caber num limite de tamanho (ex.: 50 MB do
+ * storage gratuito). Áudio copiado como está.
+ */
+export function fitBitrateArgs(src: string, out: string, videoKbps: number, enc: VideoEncoder): string[] {
+  const b = `${Math.round(videoKbps)}k`
+  const max = `${Math.round(videoKbps * 1.25)}k`
+  const buf = `${Math.round(videoKbps * 2)}k`
+  const codec =
+    enc === 'nvenc'
+      ? ['-c:v', 'h264_nvenc', '-preset', 'p5', '-rc', 'vbr', '-b:v', b, '-maxrate', max, '-bufsize', buf]
+      : enc === 'amf'
+        ? ['-c:v', 'h264_amf', '-rc', 'vbr_peak', '-b:v', b, '-maxrate', max]
+        : ['-c:v', 'libx264', '-preset', 'medium', '-b:v', b, '-maxrate', max, '-bufsize', buf]
+  return [...BASE, '-i', src, '-map', '0:v:0', '-map', '0:a:0?', ...codec, '-profile:v', 'high', '-pix_fmt', 'yuv420p', '-c:a', 'copy', '-movflags', '+faststart', out]
+}
+
+/** Bitrate de vídeo (kbps) pra um arquivo de `seconds` caber em `maxBytes` (com folga). */
+export function bitrateToFit(maxBytes: number, seconds: number, audioKbps = 192): number {
+  const totalKbps = (maxBytes * 8 * 0.92) / 1000 / Math.max(1, seconds)
+  return Math.max(800, Math.floor(totalKbps - audioKbps))
 }
 
 export function frameArgs(src: string, at: number, out: string): string[] {

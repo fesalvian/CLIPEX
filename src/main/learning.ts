@@ -1,5 +1,6 @@
 // Aprender com o desempenho: views por tipo de momento e por horário de postagem.
 
+import { DEFAULT_SLOTS, pickSlots } from '@shared/schedule'
 import { NETWORKS, type Network, type ScheduleSuggestion } from '@shared/types'
 import { clipsRepo, metricsRepo, postsRepo } from './db'
 
@@ -68,4 +69,25 @@ export function suggestTimes(): ScheduleSuggestion[] {
       basedOnPosts: mine.length
     }
   })
+}
+
+/** Horas que mais deram views numa rede ('HH:00', melhor primeiro; só com 2+ posts na hora). */
+function rankedHours(network: Network): string[] {
+  const byHour = new Map<number, number[]>()
+  for (const r of postedWithViews().filter((x) => x.network === network)) {
+    const h = r.postedAt.getHours()
+    byHour.set(h, [...(byHour.get(h) ?? []), r.views])
+  }
+  return [...byHour.entries()]
+    .filter(([, v]) => v.length >= 2)
+    .map(([h, v]) => ({ h, avg: v.reduce((a, b) => a + b, 0) / v.length }))
+    .sort((a, b) => b.avg - a.avg)
+    .map((x) => `${String(x.h).padStart(2, '0')}:00`)
+}
+
+/** Os `n` melhores horários de cada rede pra postar vários cortes por dia. */
+export function bestSlots(n: number): Record<Network, string[]> {
+  const out = {} as Record<Network, string[]>
+  for (const net of NETWORKS) out[net] = pickSlots(rankedHours(net), DEFAULT_SLOTS[net], n)
+  return out
 }

@@ -6,7 +6,8 @@ import { applyDictionary } from '@shared/subtitles'
 import { NETWORKS, type Captions, type Clip, type LlmProvider } from '@shared/types'
 import { toast } from './bus'
 import { clipName, hookText, mutateClip, rebuildCues } from './clips'
-import { clipsRepo } from './db'
+import { existsSync } from 'node:fs'
+import { clipsRepo, projectsRepo } from './db'
 import { llmClient } from './llm'
 import {
   CAPTIONS_SCHEMA,
@@ -17,10 +18,11 @@ import {
   stripEmoji,
   type CaptionsOutput
 } from './llm/prompts'
-import { transcribeClip } from './pipeline'
+import { processClip, transcribeClip } from './pipeline'
 import { enqueueRender } from './render/queue'
 import { llmLane } from './sema'
 import { getSettings, platformRules } from './settings'
+import { captionStyleBlock, hookStyleBlock } from './style'
 
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
@@ -33,7 +35,17 @@ export async function generateCaptions(clipId: string, provider?: LlmProvider): 
   const rules = platformRules()
   const out = await llmLane.run(async () => {
     const client = await llmClient(provider)
-    const { system, user } = captionsPrompt(c.words!, c.cutIn, c.cutOut, hookText(c), c.llm?.title ?? null, rules, getSettings().accounts)
+    const game = projectsRepo.get(c.projectId)?.game ?? null
+    const { system, user } = captionsPrompt(
+      c.words!,
+      c.cutIn,
+      c.cutOut,
+      hookText(c),
+      c.llm?.title ?? null,
+      rules,
+      getSettings().accounts,
+      captionStyleBlock(game)
+    )
     return client.chatJson<CaptionsOutput>(system, user, CAPTIONS_SCHEMA)
   })
   const raw = captionsFromOutput(out)
@@ -51,7 +63,7 @@ export async function generateHooks(clipId: string, provider?: LlmProvider): Pro
   const avoid = c.llm?.hooks ?? []
   const out = await llmLane.run(async () => {
     const client = await llmClient(provider)
-    const { system, user } = hooksPrompt(c.words!, c.cutIn, c.cutOut, avoid)
+    const { system, user } = hooksPrompt(c.words!, c.cutIn, c.cutOut, avoid, hookStyleBlock(projectsRepo.get(c.projectId)?.game ?? null))
     return { r: await client.chatJson<{ hooks: string[] }>(system, user, HOOKS_SCHEMA), provider: client.provider }
   })
   const hooks = out.r.hooks.map((h) => stripEmoji(h).toLocaleUpperCase('pt-BR')).filter(Boolean).slice(0, 3)
@@ -144,6 +156,34 @@ async function prepareOne(id: string): Promise<void> {
       x.prepMessage = errMsg(e)
     })
   }
+}
+
+/**
+ * Ao abrir o app: retoma o que ficou no meio quando ele foi fechado (preparação,
+ * transcrição/nota de corte manual, render). Sem isso o corte fica preso em "Gerando…".
+ */
+export function resumeClipJobs(): void {
+  const toPrepare: string[] = []
+  for (const p of projectsRepo.all()) {
+    const analyzing = p.status === 'analyzing' || p.status === 'queued'
+    for (const c of clipsRepo.byProject(p.id)) {
+      if (c.render.status === 'rendering' || c.render.status === 'queued') {
+        mutateClip(c.id, (x) => {
+          x.render = { ...x.render, status: x.render.path && existsSync(x.render.path) ? 'stale' : 'none', progress: 0 }
+        })
+      }
+      if (c.prep === 'queued' || c.prep === 'working') {
+        mutateClip(c.id, (x) => {
+          x.prep = 'none'
+          x.prepMessage = null
+        })
+        toPrepare.push(c.id)
+      }
+      // corte manual interrompido (a análise do projeto já terminou)
+      if (!analyzing && (c.stage === 'transcribing' || c.stage === 'ranking')) void processClip(c.id)
+    }
+  }
+  if (toPrepare.length) prepareClips(toPrepare)
 }
 
 /** Reaplica o dicionário nos trechos de legenda de um corte. */

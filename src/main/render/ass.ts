@@ -1,26 +1,25 @@
-// Legenda queimada no formato ASS (libass): trechos curtos em caixa alta, palavra falada
-// destacada, e o gancho numa caixa branca nos primeiros segundos.
+// Legenda queimada no formato ASS (libass): trechos curtos, palavra falada destacada,
+// gancho nos primeiros segundos. Posição, fonte, cores e animações vêm do estilo efetivo
+// do corte (src/shared/text.ts), as mesmas contas que o preview usa.
 
-import { HOOK_SECONDS, OUT_H, OUT_W } from '@shared/defaults'
-import { captionAnchor } from '@shared/geometry'
-import type { CamSplit, ClipLayout, SubtitleCue } from '@shared/types'
-
-export const CAPTION_FONT = 'Montserrat ExtraBold'
+import { OUT_H, OUT_W } from '@shared/consts'
+import { ANIM, TEXT_MARGIN, captionTextTop, displayText, typewriterStep } from '@shared/text'
+import type { CaptionStyle, HookStyle, SubtitleCue } from '@shared/types'
 
 export interface AssConfig {
   cues: SubtitleCue[]
   hook: string | null
   cutIn: number
   cutOut: number
-  layout: ClipLayout
-  camSplit: CamSplit
-  /** cor da palavra destacada, #RRGGBB */
-  highlight?: string
+  caption: CaptionStyle & { y: number }
+  hookStyle: HookStyle & { y: number }
+  /** a família é negrito no arquivo (o libass precisa do Bold=-1 pra achar) */
+  isBold?: (family: string) => boolean
 }
 
-/** #RRGGBB → &H00BBGGRR */
+/** #RRGGBB → &HAABBGGRR */
 export function assColor(hex: string, alpha = 0): string {
-  const h = hex.replace('#', '')
+  const h = hex.replace('#', '').padEnd(6, '0')
   const r = h.slice(0, 2)
   const g = h.slice(2, 4)
   const b = h.slice(4, 6)
@@ -48,17 +47,34 @@ export function assEscape(text: string): string {
     .replace(/\r?\n/g, '\\N')
 }
 
-function upper(s: string): string {
-  return s.toLocaleUpperCase('pt-BR')
+function ms(sec: number): number {
+  return Math.round(sec * 1000)
+}
+
+const POP = `\\fscx${ANIM.popFrom * 100}\\fscy${ANIM.popFrom * 100}\\t(0,${ms(ANIM.popIn)},\\fscx${ANIM.popOver * 100}\\fscy${ANIM.popOver * 100})\\t(${ms(ANIM.popIn)},${ms(ANIM.popIn + ANIM.popSettle)},\\fscx100\\fscy100)`
+
+function pos(x: number, y: number): string {
+  return `\\an5\\pos(${Math.round(x)},${Math.round(y)})`
+}
+
+/**
+ * Margens da linha que limitam a largura onde o texto cresce antes de quebrar (com \pos o
+ * libass posiciona pelo ponto, mas quebra a linha pela largura entre as margens).
+ */
+export function wrapMargins(boxWidth: number): string {
+  const m = Math.max(0, Math.round((OUT_W - Math.max(80, Math.min(OUT_W, boxWidth))) / 2))
+  return `${m},${m}`
 }
 
 export function buildAss(c: AssConfig): string {
   const dur = Math.max(0.1, c.cutOut - c.cutIn)
-  const anchor = captionAnchor(c.layout, c.camSplit)
-  const captionMarginV = Math.round(anchor * OUT_H + 40)
-  const hi = assColor(c.highlight ?? '#C4B5FD')
-  const white = assColor('#FFFFFF')
+  const cap = c.caption
+  const hk = c.hookStyle
+  const bold = (f: string): number => (c.isBold?.(f) ? -1 : 0)
+  const hi = assColor(cap.highlight)
+  const base = assColor(cap.color)
 
+  const hookOutline = hk.box ? assColor(hk.boxColor) : assColor(hk.outlineColor)
   const lines: string[] = [
     '[Script Info]',
     'ScriptType: v4.00+',
@@ -70,17 +86,43 @@ export function buildAss(c: AssConfig): string {
     '',
     '[V4+ Styles]',
     'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
-    `Style: Caption,${CAPTION_FONT},84,${white},${white},&H00000000,&H90000000,0,0,0,0,100,100,0,0,1,7,4,8,70,70,${captionMarginV},1`,
-    `Style: Hook,${CAPTION_FONT},60,${assColor('#12123A')},${assColor('#12123A')},${white},&H00000000,0,0,0,0,100,100,0,0,3,22,0,8,90,90,130,1`,
+    `Style: Caption,${cap.font},${Math.round(cap.size)},${base},${base},${assColor(cap.outlineColor)},${cap.shadow ? '&H90000000' : '&HFF000000'},${bold(cap.font)},0,0,0,100,100,0,0,1,${cap.outlineWidth},${cap.shadow ? 4 : 0},5,${TEXT_MARGIN},${TEXT_MARGIN},0,1`,
+    // Secundária transparente: a máquina de escrever usa karaokê (\k) pra revelar letra por letra.
+    `Style: Hook,${hk.font},${Math.round(hk.size)},${assColor(hk.color)},${assColor(hk.color, hk.animation === 'typewriter' ? 255 : 0)},${hookOutline},&H00000000,${bold(hk.font)},0,0,0,100,100,0,0,${hk.box ? 3 : 1},${hk.box ? 22 : hk.outlineWidth},0,5,90,90,0,1`,
     '',
     '[Events]',
     'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text'
   ]
 
   const hook = c.hook?.trim()
-  if (hook) {
-    lines.push(`Dialogue: 2,${assTime(0)},${assTime(Math.min(HOOK_SECONDS, dur))},Hook,,0,0,0,,${assEscape(upper(hook))}`)
+  if (hook && hk.enabled) {
+    const text = displayText(hook, hk.uppercase)
+    const end = Math.min(hk.duration, dur)
+    const fadeOut = hk.animation === 'none' ? '' : `\\fad(0,${ms(ANIM.hookFadeOut)})`
+    let tags = pos(hk.x, hk.y)
+    let body = assEscape(text)
+    switch (hk.animation) {
+      case 'fade':
+        tags += `\\fad(${ms(ANIM.hookFadeIn)},${ms(ANIM.hookFadeOut)})`
+        break
+      case 'pop':
+        tags += POP + fadeOut
+        break
+      case 'slide':
+        tags = `\\an5\\move(${Math.round(hk.x)},${Math.round(hk.y - ANIM.slideFrom)},${Math.round(hk.x)},${Math.round(hk.y)},0,${ms(ANIM.slideIn)})\\fad(${ms(ANIM.slideIn / 2)},${ms(ANIM.hookFadeOut)})`
+        break
+      case 'typewriter': {
+        const step = Math.max(1, Math.round(typewriterStep(text.length) * 100))
+        tags += fadeOut
+        // \ko: a letra ainda não "digitada" some inteira (preenchimento e contorno)
+        body = [...text].map((ch) => `{\\ko${step}}${assEscape(ch)}`).join('')
+        break
+      }
+    }
+    lines.push(`Dialogue: 2,${assTime(0)},${assTime(end)},Hook,,${wrapMargins(hk.boxWidth)},0,,{${tags}}${body}`)
   }
+
+  if (!cap.enabled) return lines.join('\n') + '\n'
 
   for (const cue of c.cues) {
     const words = cue.words.filter((w) => w.w.trim())
@@ -92,13 +134,23 @@ export function buildAss(c: AssConfig): string {
       const a = Math.max(0, start - c.cutIn)
       const b = Math.min(dur, end - c.cutIn)
       if (b - a < 0.02) continue
-      const text = words
+      // presa pelo topo (\an8): linhas a mais crescem pra baixo, a logo acima não é coberta
+      let tags = `\\an8\\pos(${Math.round(cap.x)},${captionTextTop(cap)})`
+      if (i === 0 && cap.animation === 'pop') tags += POP
+      if (i === 0 && cap.animation === 'fade') tags += `\\fad(${ms(ANIM.captionFade)},0)`
+      const shown = cap.animation === 'reveal' ? words.slice(0, i + 1) : words
+      const text = shown
         .map((w, k) => {
-          const t = assEscape(upper(w.w))
-          return k === i ? `{\\c${hi}}${t}{\\c${white}}` : t
+          const t = assEscape(displayText(w.w, cap.uppercase))
+          if (k !== i) return t
+          if (cap.animation === 'bounce') {
+            const s = Math.round(ANIM.bounceScale * 100)
+            return `{\\c${hi}\\t(0,${ms(ANIM.bounceIn)},\\fscx${s}\\fscy${s})}${t}{\\c${base}\\fscx100\\fscy100}`
+          }
+          return `{\\c${hi}}${t}{\\c${base}}`
         })
         .join(' ')
-      lines.push(`Dialogue: 1,${assTime(a)},${assTime(b)},Caption,,0,0,0,,${text}`)
+      lines.push(`Dialogue: 1,${assTime(a)},${assTime(b)},Caption,,${wrapMargins(cap.boxWidth)},0,,{${tags}}${text}`)
     }
   }
   return lines.join('\n') + '\n'

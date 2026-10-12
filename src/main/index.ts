@@ -9,6 +9,10 @@ import { handleMediaProtocol, registerMediaScheme } from './media'
 import { resourcesDir } from './paths'
 import { killAllProcesses } from './proc'
 import { resumePending } from './pipeline'
+import { resumeClipJobs } from './prepare'
+import { markProjectStale } from './render/queue'
+import { consumeWatermarkMigration } from './settings'
+import { projectsRepo } from './db'
 import { hasPendingPosts, startScheduler, stopScheduler } from './posting/scheduler'
 import { startWatcher, stopWatcher } from './watcher'
 
@@ -24,7 +28,7 @@ function createWindow(): BrowserWindow {
   const w = new BrowserWindow({
     width: 1440,
     height: 940,
-    minWidth: 1100,
+    minWidth: 1280,
     minHeight: 700,
     show: false,
     title: 'Clipador',
@@ -100,7 +104,10 @@ if (!app.requestSingleInstanceLock()) {
     applyDevSettings()
     startWatcher()
     startScheduler()
+    // marca d'água antiga trocada pela logo presa à legenda: renders prontos ficam velhos
+    if (consumeWatermarkMigration()) for (const p of projectsRepo.all()) markProjectStale(p.id)
     resumePending()
+    resumeClipJobs()
     void runDevTour(mainWindow)
     process.on('uncaughtException', (e) => toast('error', `Erro interno: ${e.message}`))
   })

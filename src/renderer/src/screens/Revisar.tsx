@@ -12,16 +12,12 @@ import { DictionaryPanel } from '../components/review/DictionaryPanel'
 import { HookPanel } from '../components/review/HookPanel'
 import { ScheduleConfirm } from '../components/review/ScheduleConfirm'
 import { SubtitlePanel } from '../components/review/SubtitlePanel'
+import type { TextKind, TextPatch } from '../components/TextLayer'
 import { usePreviewPlayer } from '../lib/player'
+import { captionStyleFor, hookStyleFor, hookTextFor } from '@shared/text'
 import { clipLabel, clipList, useStore } from '../store'
 
 const NETS: Network[] = ['instagram', 'youtube', 'tiktok']
-
-function hookOf(c: Clip): string | null {
-  if (c.hookCustom.trim()) return c.hookCustom.trim()
-  if (c.hookChoice === null) return null
-  return c.llm?.hooks[c.hookChoice] ?? null
-}
 
 function zoomOf(c: Clip): number | null {
   if (!c.zoomEnabled) return null
@@ -56,9 +52,33 @@ function postLine(posts: Post[]): string | null {
   const sched = live.filter((p) => p.status === 'scheduled' || p.status === 'uploading').length
   const draft = live.filter((p) => p.status === 'draft').length
   const failed = live.filter((p) => p.status === 'failed').length
-  return [posted && `${posted} postado`, sched && `${sched} agendado`, draft && `${draft} rascunho`, failed && `${failed} falhou`]
+  const privateOnly = live.filter((p) => p.note).length
+  return [
+    posted && `${posted} postado`,
+    privateOnly && `${privateOnly} privado no YouTube`,
+    sched && `${sched} agendado`,
+    draft && `${draft} rascunho`,
+    failed && `${failed} falhou`
+  ]
     .filter(Boolean)
     .join(' · ')
+}
+
+const RHYTHMS: { v: number | null; label: string }[] = [
+  { v: null, label: 'Todos juntos' },
+  { v: 1, label: '1 por dia' },
+  { v: 2, label: '2 por dia' },
+  { v: 3, label: '3 por dia' },
+  { v: 5, label: '5 por dia' },
+  { v: 10, label: '10 por dia' }
+]
+
+function rhythmHint(perDay: number | null, count: number, mode: 'now' | 'sched'): string {
+  const first = mode === 'now' ? 'O melhor corte sai agora' : 'O melhor corte sai na data e hora acima'
+  if (!perDay) return mode === 'now' ? 'Todos os cortes saem agora.' : 'Todos os cortes saem na data e hora acima.'
+  const days = Math.ceil(count / perDay)
+  if (perDay === 1 && mode === 'sched') return `${first}; um por dia, sempre nesse horário (${days} ${days === 1 ? 'dia' : 'dias'}).`
+  return `${first}; o resto vai nos melhores horários de cada rede, ${perDay} por dia (${days} ${days === 1 ? 'dia' : 'dias'}).`
 }
 
 function defaultDateTime(s: ScheduleSuggestion | undefined): { date: string; time: string } {
@@ -78,11 +98,19 @@ export function Revisar() {
   const settings = useStore((s) => s.settings)
   const patchClip = useStore((s) => s.patchClip)
   const toast = useStore((s) => s.toast)
+  const setProjectState = useStore((s) => s.setProject)
 
-  const clips = useMemo(() => clipList(clipsMap).filter((c) => c.approved).sort((a, b) => a.number - b.number), [clipsMap])
+  const clips = useMemo(
+    () =>
+      clipList(clipsMap)
+        .filter((c) => c.approved)
+        .sort((a, b) => a.number - b.number),
+    [clipsMap]
+  )
   const [selId, setSelId] = useState<string | null>(null)
   const sel = clips.find((c) => c.id === selId) ?? clips[0] ?? null
-  const player = usePreviewPlayer(sel)
+  const player = usePreviewPlayer(sel, project?.proxyPath ?? null)
+  const [textDraft, setTextDraft] = useState<{ clipId: string; patch: Partial<Clip> } | null>(null)
 
   const [rules, setRules] = useState<PlatformRules | null>(null)
   const [provider, setProvider] = useState<LlmProvider>(settings?.llmProvider ?? 'openai')
@@ -91,10 +119,27 @@ export function Revisar() {
   const [suggest, setSuggest] = useState<ScheduleSuggestion[]>([])
   const [date, setDate] = useState('')
   const [time, setTime] = useState('19:30')
-  const [spread, setSpread] = useState(true)
+  const [perDay, setPerDay] = useState<number | null>(1)
+  const [slots, setSlots] = useState<Record<Network, string[]> | null>(null)
+  const [game, setGame] = useState(project?.game ?? '')
   const [confirm, setConfirm] = useState<{ req: ScheduleRequest; items: SchedulePreviewItem[] } | null>(null)
   const [downloading, setDownloading] = useState<'one' | 'all' | null>(null)
   const [connections, setConnections] = useState<Record<Network, { connected: boolean; account: string | null }> | null>(null)
+
+  // aprovado depois (ou corte manual) ainda não preparado: prepara sozinho ao abrir a revisão
+  const unprepared = clips.filter((c) => c.prep === 'none').map((c) => c.id)
+  const unpreparedKey = unprepared.join(',')
+  useEffect(() => {
+    if (unprepared.length) void call('clips:prepare', unprepared)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unpreparedKey])
+
+  useEffect(() => {
+    if (perDay && perDay > 1) void call('posts:slots', perDay).then(setSlots)
+    else setSlots(null)
+  }, [perDay])
+
+  useEffect(() => setGame(project?.game ?? ''), [project?.id, project?.game])
 
   useEffect(() => {
     void call('app:platform-rules').then(setRules)
@@ -124,13 +169,13 @@ export function Revisar() {
   const firstAt = mode === 'sched' && date ? new Date(`${date}T${time}:00`).toISOString() : null
   const sugg = suggest.find((s) => s.network === (chosen[0] ?? 'instagram'))
 
-  const openConfirm = async (clipIds: string[], spreadDaily: boolean): Promise<void> => {
+  const openConfirm = async (clipIds: string[], rhythm: number | null): Promise<void> => {
     if (chosen.length === 0 || clipIds.length === 0) return
     if (mode === 'sched' && firstAt && new Date(firstAt).getTime() < Date.now()) {
       toast('error', 'Esse horário já passou. Escolha outro ou use "Postar agora".')
       return
     }
-    const req: ScheduleRequest = { clipIds, networks: chosen, firstAt, spreadDaily: mode === 'sched' && spreadDaily }
+    const req: ScheduleRequest = { clipIds, networks: chosen, firstAt, perDay: rhythm }
     try {
       setConfirm({ req, items: await call('posts:preview', req) })
     } catch (e) {
@@ -139,18 +184,31 @@ export function Revisar() {
   }
 
   const renderAndScheduleAll = async (): Promise<void> => {
-    const stale = clips.filter((c) => c.render.status !== 'done' && c.render.status !== 'rendering' && c.render.status !== 'queued')
-    if (stale.length) await call('render:clips', stale.map((c) => c.id))
+    const stale = clips.filter(
+      (c) => c.render.status !== 'done' && c.render.status !== 'rendering' && c.render.status !== 'queued'
+    )
+    if (stale.length)
+      await call(
+        'render:clips',
+        stale.map((c) => c.id)
+      )
     await openConfirm(
       clips.map((c) => c.id),
-      spread
+      perDay
     )
   }
 
   const download = async (which: 'one' | 'all'): Promise<void> => {
     setDownloading(which)
     try {
-      const r = which === 'one' && sel ? await call('export:clip', sel.id) : await call('export:zip', project.id, clips.map((c) => c.id))
+      const r =
+        which === 'one' && sel
+          ? await call('export:clip', sel.id)
+          : await call(
+              'export:zip',
+              project.id,
+              clips.map((c) => c.id)
+            )
       if (r.ok) toast('success', `Salvo em ${r.path}`)
       else if (r.error) toast('error', r.error)
     } catch (e) {
@@ -166,6 +224,19 @@ export function Revisar() {
       : `${mode === 'sched' ? 'Agendar' : 'Postar agora'} em ${chosen.length} ${chosen.length === 1 ? 'rede' : 'redes'}`
 
   const zoomAt = sel ? zoomOf(sel) : null
+  // enquanto arrasta um texto, o preview usa a posição provisória
+  const textClip = sel ? { ...sel, ...(textDraft?.clipId === sel.id ? textDraft.patch : {}) } : null
+
+  const changeText = (c: Clip, kind: TextKind, tp: TextPatch, final: boolean): void => {
+    const patch: Partial<Clip> =
+      kind === 'caption' ? { captionStyle: { ...(c.captionStyle ?? {}), ...tp } } : { hookStyle: { ...(c.hookStyle ?? {}), ...tp } }
+    if (final) {
+      setTextDraft(null)
+      void patchClip(c.id, patch)
+    } else {
+      setTextDraft({ clipId: c.id, patch })
+    }
+  }
 
   return (
     <>
@@ -175,7 +246,11 @@ export function Revisar() {
         step="revisar"
         projectId={project.id}
         actions={
-          <button className="btn primary" disabled={clips.length === 0 || chosen.length === 0} onClick={() => void renderAndScheduleAll()}>
+          <button
+            className="btn primary"
+            disabled={clips.length === 0 || chosen.length === 0}
+            onClick={() => void renderAndScheduleAll()}
+          >
             Renderizar e agendar tudo
             <Icon name="arrowRight" color="#FFFFFF" strokeWidth={2.4} />
           </button>
@@ -223,39 +298,48 @@ export function Revisar() {
             <DictionaryPanel dictionary={settings.dictionary} clipIds={clips.map((c) => c.id)} />
           </section>
 
-          {sel && (
-            <section aria-label="Revisão do corte" className="col-review">
-              <div className="review-preview">
-                <Preview916
-                  clip={sel}
-                  crop={project.crop}
-                  player={player}
-                  width={280}
-                  hook={hookOf(sel)}
-                  zoomAt={zoomAt}
-                  watermark={sel.watermark ?? settings.watermark}
+          {sel && textClip && (
+            <section aria-label="Preview do corte" className="review-preview">
+              <Preview916
+                clip={textClip}
+                crop={project.crop}
+                player={player}
+                width={280}
+                captionStyle={captionStyleFor(textClip, settings.text)}
+                hookStyle={hookStyleFor(textClip, settings.text)}
+                hookText={hookTextFor(sel, settings.text)}
+                dictionary={settings.dictionary}
+                zoomAt={zoomAt}
+                watermark={sel.watermark ?? settings.watermark}
+                onTextChange={(kind, tp, final) => changeText(sel, kind, tp, final)}
+              />
+              <span className="hint">Pausado: arraste a legenda e o texto inicial; as alças mudam a largura e o tamanho.</span>
+              <label className="check boxed">
+                <input
+                  type="checkbox"
+                  checked={sel.zoomEnabled}
+                  onChange={() => void patchClip(sel.id, { zoomEnabled: !sel.zoomEnabled })}
                 />
-                <label className="check boxed">
-                  <input type="checkbox" checked={sel.zoomEnabled} onChange={() => void patchClip(sel.id, { zoomEnabled: !sel.zoomEnabled })} />
-                  <span style={{ flexGrow: 1 }}>Zoom na webcam no pico</span>
-                  {zoomAt !== null && (
-                    <span className="mono" style={{ fontSize: 12, color: 'var(--cam-soft)' }}>
-                      {fmtDur(zoomAt - sel.cutIn)}
-                    </span>
-                  )}
-                </label>
-                {sel.zoomEnabled && (
-                  <button className="btn xs" onClick={() => void patchClip(sel.id, { zoomAt: player.time })}>
-                    Zoom na posição atual ({fmtDur(player.time - sel.cutIn)})
-                  </button>
+                <span style={{ flexGrow: 1 }}>Zoom na webcam no pico</span>
+                {zoomAt !== null && (
+                  <span className="mono" style={{ fontSize: 12, color: 'var(--cam-soft)' }}>
+                    {fmtDur(zoomAt - sel.cutIn)}
+                  </span>
                 )}
-                <RenderStatus clip={sel} projectId={project.id} />
-              </div>
+              </label>
+              {sel.zoomEnabled && (
+                <button className="btn xs" onClick={() => void patchClip(sel.id, { zoomAt: player.time })}>
+                  Zoom na posição atual ({fmtDur(player.time - sel.cutIn)})
+                </button>
+              )}
+              <RenderStatus clip={sel} projectId={project.id} />
+            </section>
+          )}
 
-              <div className="review-edit">
-                <HookPanel clip={sel} provider={provider} onProvider={setProvider} />
-                <SubtitlePanel clip={sel} dictionary={settings.dictionary} onSeek={(s) => player.seek(s)} />
-              </div>
+          {sel && (
+            <section aria-label="Revisão do corte" className="review-edit">
+              <HookPanel clip={sel} provider={provider} onProvider={setProvider} />
+              <SubtitlePanel clip={sel} dictionary={settings.dictionary} onSeek={(s) => player.seek(s)} />
             </section>
           )}
 
@@ -273,19 +357,49 @@ export function Revisar() {
                         <span style={{ fontSize: 14, fontWeight: 600 }}>
                           {rules[n].product} · {settings.accounts[n]}
                         </span>
-                        <span style={{ fontSize: 12, color: n === 'tiktok' ? 'var(--warn)' : 'var(--muted)' }}>{rules[n].delivery}</span>
-                        {conn && !conn.connected && <span style={{ fontSize: 11, color: 'var(--warn)' }}>Conta não conectada (Configurações)</span>}
+                        <span style={{ fontSize: 12, color: n === 'tiktok' ? 'var(--warn)' : 'var(--muted)' }}>
+                          {rules[n].delivery}
+                        </span>
+                        {conn && !conn.connected && (
+                          <span style={{ fontSize: 11, color: 'var(--warn)' }}>Conta não conectada (Configurações)</span>
+                        )}
                       </span>
                     </label>
                   )
                 })}
               </div>
 
+              <div className="panel" style={{ gap: 8 }}>
+                <label className="field">
+                  <span className="field-row">
+                    Jogo da live
+                    <span className="hint">a IA usa nas legendas e hashtags</span>
+                  </span>
+                  <input
+                    className="input"
+                    placeholder="Ex.: Valorant (sem jogo, a IA não chuta)"
+                    value={game}
+                    onChange={(e) => setGame(e.target.value)}
+                    onBlur={() => {
+                      if (game !== (project.game ?? '')) void call('projects:set-game', project.id, game).then(setProjectState)
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+                    }}
+                  />
+                </label>
+              </div>
+
               <CaptionsPanel clip={sel} rules={rules} accounts={settings.accounts} provider={provider} />
 
               <div className="panel">
                 <span className="panel-title">Quando</span>
-                <div className="seg well" role="group" aria-label="Quando postar" style={{ gridTemplateColumns: 'repeat(2, minmax(0, 1fr))' }}>
+                <div
+                  className="seg well"
+                  role="group"
+                  aria-label="Quando postar"
+                  style={{ gridTemplateColumns: 'repeat(2, minmax(0, 1fr))' }}
+                >
                   <button aria-pressed={mode === 'now'} onClick={() => setMode('now')}>
                     Postar agora
                   </button>
@@ -313,15 +427,32 @@ export function Revisar() {
                         </span>
                       </div>
                     )}
-                    <label className="check">
-                      <input type="checkbox" checked={spread} onChange={() => setSpread(!spread)} />
-                      Espalhar os {clips.length} cortes, um por dia
-                    </label>
                   </>
                 )}
+
+                <div className="rhythm">
+                  <span className="label">Ritmo do "Renderizar e agendar tudo" ({clips.length} cortes)</span>
+                  <div className="rhythm-opts" role="group" aria-label="Cortes por dia">
+                    {RHYTHMS.map((r) => (
+                      <button key={String(r.v)} className="pill-btn" aria-pressed={perDay === r.v} onClick={() => setPerDay(r.v)}>
+                        {r.label}
+                      </button>
+                    ))}
+                  </div>
+                  <span className="hint">{rhythmHint(perDay, clips.length, mode)}</span>
+                  {slots && (
+                    <div className="slot-list">
+                      {chosen.map((n) => (
+                        <span key={n} className="mono">
+                          <b>{rules[n].label}</b> {slots[n]?.join(' · ')}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
 
-              <button className="btn primary lg" disabled={chosen.length === 0} onClick={() => void openConfirm([sel.id], false)}>
+              <button className="btn primary lg" disabled={chosen.length === 0} onClick={() => void openConfirm([sel.id], null)}>
                 {ctaLabel}
               </button>
 
@@ -331,7 +462,8 @@ export function Revisar() {
                     Plano B: baixar e postar na mão
                   </span>
                   <span className="hint">
-                    Se a postagem automática falhar, baixe os vídeos já renderizados. Cada um vem com um .txt das legendas e hashtags de cada rede.
+                    Se a postagem automática falhar, baixe os vídeos já renderizados. Cada um vem com um .txt das legendas e
+                    hashtags de cada rede.
                   </span>
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 8 }}>

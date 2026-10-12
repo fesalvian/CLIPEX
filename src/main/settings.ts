@@ -1,23 +1,61 @@
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { app } from 'electron'
-import { defaultSettings } from '@shared/defaults'
+import { channelLogo, defaultSettings } from '@shared/defaults'
 import type { PlatformRules } from '@shared/platformRules'
-import type { Settings } from '@shared/types'
+import { mergeDefaults } from '@shared/text'
+import type { Settings, Watermark } from '@shared/types'
 import { settingsRepo } from './db'
-import { configFile } from './paths'
+import { configFile, resourcesDir } from './paths'
 
 const KEY = 'app'
 let cached: Settings | null = null
 
+/** Logo do canal que vem com o app (já recortada). */
+export function channelLogoPath(): string | null {
+  const p = join(resourcesDir(), 'brand', 'logoLives.png')
+  return existsSync(p) ? p : null
+}
+
+/**
+ * Marca d'água salva por versões antigas (sem `anchor`, PNG com borda transparente e
+ * posição fixa) vira a logo do canal presa acima da legenda.
+ */
+export function upgradeWatermark(stored: Partial<Watermark> | undefined, fallback: Watermark): Watermark {
+  if (!stored) return fallback
+  if (stored.anchor === undefined) {
+    watermarkMigrated = true
+    const logo = channelLogoPath()
+    return logo ? channelLogo(logo) : { ...fallback, ...stored, anchor: 'free', gap: 36, offsetX: 0 }
+  }
+  return { ...fallback, ...stored }
+}
+
+let watermarkMigrated = false
+
+/** A marca d'água antiga virou a logo presa à legenda nesta abertura? (uma vez só) */
+export function consumeWatermarkMigration(): boolean {
+  getSettings()
+  const v = watermarkMigrated
+  if (v) {
+    watermarkMigrated = false
+    // grava a versão nova pra não migrar de novo
+    settingsRepo.set(KEY, getSettings())
+  }
+  return v
+}
+
 export function getSettings(): Settings {
   if (cached) return cached
   const stored = settingsRepo.get<Partial<Settings>>(KEY) ?? {}
-  const defaults = defaultSettings(app.getPath('videos'))
+  const defaults = defaultSettings(app.getPath('videos'), channelLogoPath())
   cached = {
     ...defaults,
     ...stored,
-    watermark: { ...defaults.watermark, ...(stored.watermark ?? {}) },
-    accounts: { ...defaults.accounts, ...(stored.accounts ?? {}) }
+    watermark: upgradeWatermark(stored.watermark, defaults.watermark),
+    accounts: { ...defaults.accounts, ...(stored.accounts ?? {}) },
+    text: mergeDefaults(stored.text),
+    style: { ...defaults.style, ...(stored.style ?? {}) }
   }
   return cached
 }

@@ -12,6 +12,7 @@ import { clipName } from './clips'
 import { clipsRepo, projectsRepo } from './db'
 import { ensureRendered, outputName } from './render/queue'
 import { getSettings, platformRules } from './settings'
+import { learnFromClip } from './style'
 
 export function captionsTxt(c: Clip): string {
   const rules = platformRules()
@@ -44,6 +45,8 @@ export async function exportClip(clipId: string): Promise<ExportResult> {
   if (res.canceled || !res.filePath) return { ok: false, path: null, error: null }
   copyFileSync(c.render.path!, res.filePath)
   writeFileSync(res.filePath.replace(/\.mp4$/i, '.txt'), captionsTxt(c), 'utf8')
+  // baixou pra postar na mão: o texto final vira exemplo do jeito de escrever
+  learnFromClip(c)
   return { ok: true, path: res.filePath, error: null }
 }
 
@@ -70,6 +73,7 @@ export async function exportZip(projectId: string, clipIds: string[]): Promise<E
     const out = createWriteStream(res.filePath!)
     zip.outputStream.pipe(out).on('close', resolve).on('error', reject)
   })
+  for (const c of rendered) learnFromClip(c)
   return { ok: true, path: res.filePath, error: null }
 }
 

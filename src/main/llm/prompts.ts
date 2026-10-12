@@ -13,6 +13,16 @@ const TAG_PT: Record<DetectedTag, string> = {
 
 const CHANNEL = `Você trabalha editando cortes da live de jogo do streamer brasileiro Felipe Salviano ("Senhor Salvian"), que faz live na Twitch. Os cortes viram vídeos verticais pra Instagram Reels, YouTube Shorts e TikTok, pro público brasileiro. Escreva sempre em português do Brasil, num tom natural de quem joga e vê live, sem emoji.`
 
+/**
+ * Regras contra texto "com cara de IA" e contra inventar o que não aconteceu: o modelo só
+ * sabe o que está na transcrição (não vê o vídeo).
+ */
+export const HUMAN_RULES = `Regras de escrita (valem pra tudo que você escrever):
+- Você só sabe o que está na transcrição; você NÃO vê o vídeo. Não invente o que aconteceu, quem é quem, o mapa, a arma ou o jogo. Se a transcrição não deixa claro, escreva algo que funcione sem esse detalhe.
+- Escreva como o streamer escreveria pros seguidores dele: frases curtas, gíria de live quando couber, nada de texto de agência ou de marketing.
+- Evite frases genéricas e clichês de IA: "você não vai acreditar", "momento épico", "insano", "simplesmente", "prepare-se", "confira", "não perca", "isso é ouro", "mais um dia", exclamação em toda frase.
+- Prefira citar uma fala real do trecho (curta) a resumir com adjetivo.`
+
 /** Transcrição com tempos relativos ao início da janela: "[00:12] mano olha ali". */
 export function transcriptForPrompt(words: Word[], from: number, to: number): string {
   const cues = buildCues(words, from, to, { maxWords: 14, maxChars: 90, pauseBreak: 1.2 })
@@ -21,6 +31,8 @@ export function transcriptForPrompt(words: Word[], from: number, to: number): st
 }
 
 export interface RankInput {
+  /** bloco "como o Felipe escreve" + exemplos de ganchos (main/style.ts) */
+  style: string
   words: Word[]
   winStart: number
   winEnd: number
@@ -80,6 +92,8 @@ Regras do corte sugerido:
 
 Ganchos: exatamente 3 opções curtas (até 45 caracteres), em CAIXA ALTA, pra aparecer na tela nos 3 primeiros segundos e prender quem está rolando o feed. Sem emoji, sem mentir sobre o que acontece.
 
+${HUMAN_RULES}
+${i.style ? `\n${i.style}\n` : ''}
 Responda só com o JSON pedido.`
 
   const tags = i.tags.map((t) => TAG_PT[t]).join(', ')
@@ -105,11 +119,15 @@ export const HOOKS_SCHEMA: JsonSchema = {
   }
 }
 
-export function hooksPrompt(words: Word[], from: number, to: number, avoid: string[]): { system: string; user: string } {
+export function hooksPrompt(words: Word[], from: number, to: number, avoid: string[], style = ''): { system: string; user: string } {
   return {
     system: `${CHANNEL}
 
-Escreva 3 ganchos novos pra um corte: textos curtos (até 45 caracteres) em CAIXA ALTA que aparecem na tela nos 3 primeiros segundos. Precisam despertar curiosidade e combinar com o que acontece no trecho. Sem emoji, sem mentir. Responda só com o JSON.`,
+Escreva 3 ganchos novos pra um corte: textos curtos (até 45 caracteres) em CAIXA ALTA que aparecem na tela nos 3 primeiros segundos. Precisam despertar curiosidade e combinar com o que acontece no trecho. Sem emoji, sem mentir.
+
+${HUMAN_RULES}
+${style ? `\n${style}\n` : ''}
+Responda só com o JSON.`,
     user: `Não repita estes: ${avoid.join(' | ') || '(nenhum)'}\n\nTranscrição do corte:\n${transcriptForPrompt(words, from, to)}`
   }
 }
@@ -157,7 +175,8 @@ export function captionsPrompt(
   hook: string | null,
   title: string | null,
   rules: PlatformRules,
-  accounts: Accounts
+  accounts: Accounts,
+  style = ''
 ): { system: string; user: string } {
   const rule = (k: keyof PlatformRules): string =>
     `${rules[k].product} (${k === 'instagram' ? accounts.instagram : k === 'tiktok' ? accounts.tiktok : accounts.youtube}): ${rules[k].guidance.join(' ')} Texto até ${rules[k].maxChars} caracteres; ${rules[k].hashtags.min} a ${rules[k].hashtags.max} hashtags${rules[k].hashtags.required.length ? `, sempre com ${rules[k].hashtags.required.join(' ')}` : ''}.${rules[k].hasTitle ? ` Título até ${rules[k].titleMax ?? 100} caracteres.` : ''}`
@@ -169,7 +188,11 @@ Escreva a legenda e as hashtags de um corte pra cada rede, seguindo as regras de
 - ${rule('tiktok')}
 - ${rule('youtube')}
 
-Hashtags em minúsculas, sem acento, específicas do momento e do jogo quando der pra saber. Não ponha hashtags dentro do texto, só na lista. Responda só com o JSON.`,
+Hashtags em minúsculas, sem acento, específicas do momento e do jogo (só se o jogo foi informado). Não ponha hashtags dentro do texto, só na lista.
+
+${HUMAN_RULES}
+${style ? `\n${style}\n` : ''}
+Responda só com o JSON.`,
     user: [
       title ? `Momento: ${title}` : '',
       hook ? `Gancho na tela: ${hook}` : '',

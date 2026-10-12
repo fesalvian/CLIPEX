@@ -20,7 +20,8 @@ const TYPES: Record<string, string> = {
 
 export function registerMediaScheme(): void {
   protocol.registerSchemesAsPrivileged([
-    { scheme: MEDIA_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: false } }
+    // corsEnabled: fonte (FontFace/@font-face) é sempre baixada em modo CORS
+    { scheme: MEDIA_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, corsEnabled: true, bypassCSP: false } }
   ])
 }
 
@@ -47,7 +48,13 @@ export function handleMediaProtocol(): void {
     const size = statSync(path).size
     const type = TYPES[extname(path).toLowerCase()] ?? 'application/octet-stream'
     const range = req.headers.get('range')
-    const headers: Record<string, string> = { 'content-type': type, 'accept-ranges': 'bytes', 'cache-control': 'no-cache' }
+    const headers: Record<string, string> = {
+      'content-type': type,
+      'accept-ranges': 'bytes',
+      'cache-control': 'no-cache',
+      // a página (localhost no dev, file:// no app) é outra origem: sem isso a fonte não carrega
+      'access-control-allow-origin': '*'
+    }
     if (range) {
       const m = /bytes=(\d*)-(\d*)/.exec(range)
       let start = m?.[1] ? Number(m[1]) : 0

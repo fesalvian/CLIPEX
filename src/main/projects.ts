@@ -72,6 +72,7 @@ export function createProject(sourcePath: string): Project {
     proxyPath: null,
     framePath: null,
     crop: getSettings().cropPreset ?? DEFAULT_CROP,
+    game: getSettings().style.defaultGame.trim() || null,
     status: 'queued',
     stages: emptyStages(),
     error: null,

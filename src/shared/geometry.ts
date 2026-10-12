@@ -1,4 +1,4 @@
-import { OUT_H, OUT_W } from './defaults'
+import { OUT_H, OUT_W } from './consts'
 import type { CamSplit, ClipLayout, Rect } from './types'
 
 export interface PixelRect {

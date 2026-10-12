@@ -6,8 +6,8 @@ import { execFile } from 'node:child_process'
 import { existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
-import { whisperPrompt } from '@shared/subtitles'
-import type { Clip, Project, StageKey } from '@shared/types'
+import { mergeCues, whisperPrompt } from '@shared/subtitles'
+import type { Clip, Project, StageKey, Word } from '@shared/types'
 import { buildTimeline, pickCandidates } from './analysis/candidates'
 import { splitEvents } from './analysis/events'
 import { LoudnessCollector } from './analysis/loudness'
@@ -26,8 +26,9 @@ import { normalizeRank, RANK_SCHEMA, rankPrompt, type RankOutput } from './llm/p
 import { ensureDir } from './paths'
 import { ffmpegProgress, runProcess } from './proc'
 import { saveProject, setStage } from './projects'
-import { llmLane, previewLane, whisperLane } from './sema'
+import { llmLane, previewLane, proxyLane, whisperLane } from './sema'
 import { getSettings } from './settings'
+import { hookStyleBlock } from './style'
 
 const pexec = promisify(execFile)
 
@@ -235,46 +236,90 @@ function findCandidates(p: Project): Clip[] {
   return [...existing, ...clips]
 }
 
-/** Transcreve a janela de um corte (a partir do WAV do microfone). */
-export async function transcribeClip(clipId: string): Promise<Clip | null> {
-  const clip = clipsRepo.get(clipId)
-  if (!clip) return null
-  if (clip.words) return clip
-  const p = projectsRepo.get(clip.projectId)!
+async function transcribeRange(p: Project, clipId: string, from: number, to: number): Promise<Word[]> {
   const f = files(p)
   const exe = whisperExe()
   const model = whisperModelPath()
   if (!exe || !model) throw new Error('Whisper não instalado. Baixe em Configurações › Componentes de IA.')
   if (!existsSync(f.wav)) throw new Error('Áudio do microfone ainda não foi extraído.')
+  const slice = join(f.tmp, `${clipId}_${Math.round(from)}.wav`)
+  const reader = new WavReader(f.wav, statSync(f.wav).size)
+  try {
+    writeWavSlice(reader, from, to, slice)
+  } finally {
+    reader.close()
+  }
+  try {
+    return await transcribe({
+      exe,
+      model,
+      wav: slice,
+      outBase: join(f.tmp, `${clipId}_${Math.round(from)}`),
+      offsetSec: from,
+      prompt: whisperPrompt(getSettings().dictionary),
+      useGpu: true
+    }).done
+  } finally {
+    rmSync(slice, { force: true })
+  }
+}
+
+/** Junta palavras novas sem duplicar o trecho que já estava transcrito. */
+export function mergeWords(old: Word[], fresh: Word[], oldFrom: number, oldTo: number): Word[] {
+  const keep = fresh.filter((w) => w.e <= oldFrom + 0.05 || w.s >= oldTo - 0.05)
+  return [...old, ...keep].sort((a, b) => a.s - b.s)
+}
+
+/**
+ * Garante a transcrição do corte: a janela inteira na primeira vez e, se o corte for
+ * arrastado pra fora do que já foi transcrito, só o pedaço que falta.
+ */
+export async function transcribeClip(clipId: string, opts: { priority?: boolean } = {}): Promise<Clip | null> {
+  const clip = clipsRepo.get(clipId)
+  if (!clip) return null
+  const covered = clip.words && clip.wordsFrom !== null && clip.wordsTo !== null
+  if (covered && clip.cutIn >= clip.wordsFrom! - 0.5 && clip.cutOut <= clip.wordsTo! + 0.5) return clip
+  const p = projectsRepo.get(clip.projectId)!
   return whisperLane.run(async () => {
-    mutateClip(clipId, (c) => {
-      c.stage = 'transcribing'
-    })
-    const slice = join(f.tmp, `${clipId}.wav`)
-    const reader = new WavReader(f.wav, statSync(f.wav).size)
-    try {
-      writeWavSlice(reader, clip.winStart, clip.winEnd, slice)
-    } finally {
-      reader.close()
-    }
-    try {
-      const words = await transcribe({
-        exe,
-        model,
-        wav: slice,
-        outBase: join(f.tmp, clipId),
-        offsetSec: clip.winStart,
-        prompt: whisperPrompt(getSettings().dictionary),
-        useGpu: true
-      }).done
+    const cur = clipsRepo.get(clipId)
+    if (!cur) return null
+    if (!cur.words || cur.wordsFrom === null || cur.wordsTo === null) {
+      mutateClip(clipId, (c) => {
+        c.stage = 'transcribing'
+      })
+      const from = Math.min(cur.winStart, cur.cutIn)
+      const to = Math.max(cur.winEnd, cur.cutOut)
+      const words = await transcribeRange(p, clipId, from, to)
       return mutateClip(clipId, (c) => {
         c.words = words
+        c.wordsFrom = from
+        c.wordsTo = to
         c.stage = c.llm ? 'ready' : 'ranking'
       })
-    } finally {
-      rmSync(slice, { force: true })
     }
-  })
+    // estende pros lados que faltam (com 5 s de folga)
+    const dur = p.source?.durationSec ?? cur.cutOut + 5
+    let words = cur.words
+    let from = cur.wordsFrom
+    let to = cur.wordsTo
+    if (cur.cutIn < from - 0.5) {
+      const a = Math.max(0, cur.cutIn - 5)
+      words = mergeWords(words, await transcribeRange(p, clipId, a, from + 1), from, to)
+      from = a
+    }
+    if (cur.cutOut > to + 0.5) {
+      const b = Math.min(dur, cur.cutOut + 5)
+      words = mergeWords(words, await transcribeRange(p, clipId, to - 1, b), from, to)
+      to = b
+    }
+    return mutateClip(clipId, (c) => {
+      c.words = words
+      c.wordsFrom = from
+      c.wordsTo = to
+      // legenda ganha os trechos novos sem perder edições
+      if (c.cues) c.cues = mergeCues(c.cues, words, c.cutIn, c.cutOut, getSettings().dictionary)
+    })
+  }, opts)
 }
 
 /** Pede pra LLM a nota, o corte sugerido, etiquetas e ganchos. */
@@ -284,6 +329,7 @@ export async function rankClip(clipId: string): Promise<Clip | null> {
   return llmLane.run(async () => {
     const client = await llmClient()
     const { system, user } = rankPrompt({
+      style: hookStyleBlock(projectsRepo.get(clip.projectId)?.game ?? null),
       words: clip.words!,
       winStart: clip.winStart,
       winEnd: clip.winEnd,
@@ -306,28 +352,84 @@ export async function rankClip(clipId: string): Promise<Clip | null> {
   })
 }
 
-export async function makePreview(clipId: string): Promise<Clip | null> {
+function previewCovers(c: Clip): boolean {
+  return (
+    !!c.previewPath &&
+    existsSync(c.previewPath) &&
+    c.previewStart !== null &&
+    c.previewEnd !== null &&
+    c.cutIn >= c.previewStart - 0.1 &&
+    c.cutOut <= c.previewEnd + 0.1
+  )
+}
+
+/**
+ * Trecho 360p do corte pra tocar na tela. Cobre a janela visível (e o corte); se o corte
+ * for arrastado pra fora, gera de novo. Pedidos da tela passam na frente do lote.
+ */
+export async function makePreview(clipId: string, opts: { priority?: boolean } = {}): Promise<Clip | null> {
   const clip = clipsRepo.get(clipId)
   if (!clip) return null
-  if (clip.previewPath && existsSync(clip.previewPath)) return clip
+  if (previewCovers(clip)) return clip
   const p = projectsRepo.get(clip.projectId)!
   if (!p.source) return clip
   const f = files(p)
-  const start = Math.max(0, clip.winStart - 2)
-  const duration = Math.min(p.source.durationSec, clip.winEnd + 2) - start
-  const out = join(f.previews, `${clip.id}.mp4`)
   const track = previewTrack(p.source)
   return previewLane.run(async () => {
+    const cur = clipsRepo.get(clipId)
+    if (!cur) return null
+    if (previewCovers(cur)) return cur
+    const start = Math.max(0, Math.min(cur.winStart, cur.cutIn) - 2)
+    const end = Math.min(p.source!.durationSec, Math.max(cur.winEnd, cur.cutOut) + 2)
+    // nome muda a cada versão: o <video> da tela não fica com o arquivo velho em cache
+    const out = join(f.previews, `${cur.id}_${Math.round(start)}.mp4`)
     const enc = await videoEncoder()
     await runProcess(
       ffmpegPath(),
-      previewSegmentArgs({ src: p.sourcePath, start, duration, audioTrack: track?.order ?? 0, out, encoder: enc })
+      previewSegmentArgs({ src: p.sourcePath, start, duration: end - start, audioTrack: track?.order ?? 0, out, encoder: enc })
     ).done
-    return mutateClip(clipId, (c) => {
+    const old = cur.previewPath
+    const saved = mutateClip(clipId, (c) => {
       c.previewPath = out
       c.previewStart = start
+      c.previewEnd = end
     })
-  })
+    if (old && old !== out) rmSync(old, { force: true })
+    return saved
+  }, opts)
+}
+
+const coverageTimers = new Map<string, NodeJS.Timeout>()
+
+/** Depois de mexer no corte/janela: gera preview e transcrição do que ficou faltando. */
+export function ensureCoverage(clipId: string): void {
+  clearTimeout(coverageTimers.get(clipId))
+  coverageTimers.set(
+    clipId,
+    setTimeout(() => {
+      coverageTimers.delete(clipId)
+      void makePreview(clipId, { priority: true }).catch(() => undefined)
+      const c = clipsRepo.get(clipId)
+      if (c?.words) void transcribeClip(clipId, { priority: true }).catch(() => undefined)
+    }, 400)
+  )
+}
+
+const loudCache = new Map<string, { mtime: number; data: Float32Array }>()
+
+/** Loudness da live (10 Hz), lido uma vez e guardado em memória. */
+export function loudnessOf(projectId: string): Float32Array | null {
+  const p = projectsRepo.get(projectId)
+  if (!p) return null
+  const file = files(p).loud
+  if (!existsSync(file)) return null
+  const mtime = statSync(file).mtimeMs
+  const hit = loudCache.get(file)
+  if (hit && hit.mtime === mtime) return hit.data
+  const data = readFloat32(file)
+  loudCache.clear()
+  loudCache.set(file, { mtime, data })
+  return data
 }
 
 async function transcribeAndRank(p: Project, clips: Clip[]): Promise<void> {
@@ -394,7 +496,7 @@ async function makeProxy(p: Project): Promise<void> {
   await stage(p.id, 'proxy', async (progress) => {
     const enc = await videoEncoder()
     const tmp = `${f.proxy}.part.mp4`
-    await previewLane.run(
+    await proxyLane.run(
       () =>
         runProcess(ffmpegPath(), proxyArgs({ src: p.sourcePath, audioTrack: track?.order ?? 0, out: tmp, encoder: enc }), {
           onStdoutLine: ffmpegProgress(p.source!.durationSec, progress),
@@ -438,21 +540,20 @@ async function analyzeProject(id: string): Promise<void> {
   p.error = failed ? errMsg(failed.reason) : null
   saveProject(p, { list: true })
 
-  // Proxy da live inteira por último, em prioridade baixa.
-  try {
-    await makeProxy(p)
-  } catch {
+  // Proxy da live inteira por último, em prioridade baixa e numa fila própria:
+  // não segura nem a próxima live nem os previews pedidos na tela.
+  void makeProxy(p).catch(() => {
     // sem proxy a navegação usa os previews; o erro fica registrado na etapa
-  }
+  })
 }
 
-/** Corte manual ou reprocessamento de um corte só. */
+/** Corte manual ou reprocessamento de um corte só (pedido na tela: fura a fila do lote). */
 export async function processClip(clipId: string): Promise<void> {
   await Promise.allSettled([
-    makePreview(clipId),
+    makePreview(clipId, { priority: true }),
     (async () => {
       try {
-        await transcribeClip(clipId)
+        await transcribeClip(clipId, { priority: true })
         await rankClip(clipId)
       } catch (e) {
         mutateClip(clipId, (c) => {

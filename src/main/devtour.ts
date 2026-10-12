@@ -67,6 +67,27 @@ export async function runDevTour(win: BrowserWindow): Promise<void> {
   try {
     await waitFor(() => !win.webContents.isLoading(), 30000)
     await sleep(1500)
+
+    // CLIPADOR_TOUR=quick: só prints das telas de um projeto já analisado
+    if (process.env.CLIPADOR_TOUR === 'quick') {
+      const p = projectsRepo.all()[0]
+      if (p) {
+        await store(`await s.openProject(${JSON.stringify(p.id)}, 'revisar')`)
+        await sleep(3000)
+        await shot('q1-revisar')
+        await store(`await s.openProject(${JSON.stringify(p.id)}, 'clipar')`)
+        await sleep(3000)
+        await shot('q2-clipar')
+      }
+      await store(`s.go({ name: 'settings' })`)
+      await sleep(2500)
+      await shot('q3-configuracoes')
+      await js(`document.querySelector('.screen')?.scrollTo(0, 820)`)
+      await sleep(800)
+      await shot('q4-configuracoes-estilo')
+      return
+    }
+
     await shot('01-inicio')
 
     const file = process.env.CLIPADOR_IMPORT
@@ -96,6 +117,54 @@ export async function runDevTour(win: BrowserWindow): Promise<void> {
     await sleep(3500)
     await shot('04-clipar')
     await js(`document.querySelector('.play-btn.on')?.click()`)
+    await sleep(800)
+    // pausado: textos editáveis; arrasta o gancho pra baixo e a timeline do 1º corte (anda pela live)
+    await js(`(() => {
+      const drag = (el, x0, y0, x1, y1) => {
+        const o = (x, y) => ({ bubbles: true, clientX: x, clientY: y, pointerId: 7, button: 0, pointerType: 'mouse', isPrimary: true })
+        el.dispatchEvent(new PointerEvent('pointerdown', o(x0, y0)))
+        for (let i = 1; i <= 10; i++) el.dispatchEvent(new PointerEvent('pointermove', o(x0 + ((x1 - x0) * i) / 10, y0 + ((y1 - y0) * i) / 10)))
+        el.dispatchEvent(new PointerEvent('pointerup', o(x1, y1)))
+      }
+      const hook = document.querySelector('.text-box.hook')
+      if (hook) { const r = hook.getBoundingClientRect(); drag(hook, r.x + r.width / 2, r.y + r.height / 2, r.x + r.width / 2, r.y + r.height / 2 + 60) }
+      const wave = document.querySelector('.clip-row.sel .wave')
+      if (wave) { const r = wave.getBoundingClientRect(); drag(wave, r.x + r.width * 0.97, r.y + 30, r.x + r.width * 0.6, r.y + 30) }
+    })()`)
+    await sleep(1500)
+    await shot('04b-clipar-textos-e-timeline')
+    const c1 = clipsRepo.byProject(p0.id).sort((a, b) => a.number - b.number)[0]!
+    log(`timeline: janela ${c1.winStart}-${c1.winEnd} · ${JSON.stringify(c1.hookStyle)}`)
+
+    // corte manual: quanto tempo até o preview aparecer (o proxy está rodando agora)
+    const t0 = Date.now()
+    const manual = await js<{ id: string }>(`window.api.invoke('clips:create-manual', ${JSON.stringify(p0.id)}, 200)`)
+    await waitFor(() => !!clipsRepo.get(manual.id)?.previewPath, 3 * 60 * 1000, 250)
+    log(`corte manual: preview em ${((Date.now() - t0) / 1000).toFixed(1)} s (proxy: ${projectsRepo.get(p0.id)?.stages.proxy.status})`)
+    await waitFor(() => !!clipsRepo.get(manual.id)?.words, 3 * 60 * 1000, 250)
+    log(`corte manual: transcrição em ${((Date.now() - t0) / 1000).toFixed(1)} s`)
+
+    // move um corte pra fora da janela original: tem que gerar preview e transcrição do pedaço novo
+    const before = clipsRepo.get(c1.id)!
+    const newIn = Math.round(before.winEnd + 20)
+    const t1 = Date.now()
+    await js(`window.api.invoke('clips:update', ${JSON.stringify(c1.id)}, { cutIn: ${newIn}, cutOut: ${newIn + 20} })`)
+    await waitFor(() => {
+      const x = clipsRepo.get(c1.id)!
+      return x.previewStart !== null && x.previewEnd !== null && x.previewStart <= x.cutIn && x.previewEnd >= x.cutOut && (x.wordsTo ?? 0) >= x.cutOut
+    }, 3 * 60 * 1000, 250)
+    const after = clipsRepo.get(c1.id)!
+    log(
+      `corte movido: ${before.cutIn}-${before.cutOut} → ${after.cutIn}-${after.cutOut}, janela ${after.winStart}-${after.winEnd}, ` +
+        `preview ${after.previewStart}-${after.previewEnd}, palavras ${before.words?.length}→${after.words?.length} ` +
+        `(${after.wordsFrom}-${after.wordsTo}) em ${((Date.now() - t1) / 1000).toFixed(1)} s`
+    )
+    await store(`await s.openProject(${JSON.stringify(p0.id)}, 'clipar')`)
+    await sleep(1500)
+    await js(`document.querySelector('.filter-btn:last-child')?.click()`)
+    await sleep(1200)
+    await shot('04c-clipar-filtro-manuais')
+    await js(`document.querySelector('.filter-btn')?.click()`)
 
     // aprova os 2 melhores e manda preparar
     const best = [...clips].sort((a, b) => (b.llm?.score ?? b.signalScore * 100) - (a.llm?.score ?? a.signalScore * 100)).slice(0, 2)
@@ -125,8 +194,14 @@ export async function runDevTour(win: BrowserWindow): Promise<void> {
     await js(`document.querySelector('.p916-canvas')?.click()`)
 
     await store(`s.go({ name: 'settings' })`)
-    await sleep(1500)
+    await sleep(2500)
     await shot('07-configuracoes')
+    // aba do texto inicial com máquina de escrever, e modo posicionar
+    await js(`document.querySelectorAll('.style-form [role=tab]')[1]?.click()`)
+    await sleep(400)
+    await js(`(() => { const s = [...document.querySelectorAll('.style-form select')].find((x) => [...x.options].some((o) => o.value === 'typewriter')); if (s) { const set = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set; set.call(s, 'typewriter'); s.dispatchEvent(new Event('change', { bubbles: true })) } })()`)
+    await sleep(1300)
+    await shot('08-config-texto-inicial')
   } catch (e) {
     log(`erro: ${(e as Error).stack ?? e}`)
   } finally {

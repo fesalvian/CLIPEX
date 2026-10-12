@@ -1,30 +1,50 @@
 import { useEffect, useMemo, useRef, type PointerEvent as RPointerEvent } from 'react'
-import { HOOK_SECONDS, OUT_W } from '@shared/defaults'
-import { captionAnchor, coverCrop, layoutPanes, zoomCrop } from '@shared/geometry'
-import { buildCues, stripEmoji } from '@shared/subtitles'
+import { OUT_W } from '@shared/defaults'
+import { coverCrop, layoutPanes, zoomCrop } from '@shared/geometry'
+import { applyDictionary, buildCues } from '@shared/subtitles'
 import { fmtDur } from '@shared/time'
-import type { Clip, CropLayout, Watermark } from '@shared/types'
+import type { CaptionStyle, Clip, CropLayout, DictEntry, HookStyle, SubtitleCue, Watermark } from '@shared/types'
 import { mediaUrl } from '../api'
 import type { Player } from '../lib/player'
 import { Icon } from './Icon'
+import { TextLayer, type TextKind, type TextPatch } from './TextLayer'
+import { watermarkBox } from '@shared/text'
+import { capturePointer } from '../lib/pointer'
 
 const ZOOM = { lead: 0.25, duration: 1.6, factor: 1.35 }
+
+const SAMPLE_CUE: SubtitleCue = {
+  id: 'sample',
+  start: 0,
+  end: 1,
+  words: [
+    { w: 'sua', s: 0, e: 0.3 },
+    { w: 'legenda', s: 0.3, e: 0.6 },
+    { w: 'aqui', s: 0.6, e: 1 }
+  ]
+}
 
 interface Props {
   clip: Clip | null
   crop: CropLayout
   player: Player
   width: number
-  hook?: string | null
+  captionStyle: CaptionStyle & { y: number }
+  hookStyle: HookStyle & { y: number }
+  hookText: string | null
+  dictionary: DictEntry[]
   /** momento do punch-in (s na live) ou null */
   zoomAt?: number | null
   watermark: Watermark
   /** permite arrastar/redimensionar a marca d'água */
   onWatermarkChange?: (wm: Watermark, final: boolean) => void
+  /** permite arrastar e redimensionar a legenda e o gancho (com o vídeo pausado) */
+  onTextChange?: (kind: TextKind, patch: TextPatch, final: boolean) => void
 }
 
-/** Preview 9:16: compõe webcam e jogo do preview 360p com a mesma conta de recorte do render. */
-export function Preview916({ clip, crop, player, width, hook, zoomAt, watermark, onWatermarkChange }: Props) {
+/** Preview 9:16: compõe webcam e jogo do vídeo leve com a mesma conta de recorte do render. */
+export function Preview916(props: Props) {
+  const { clip, crop, player, width, captionStyle, hookStyle, hookText, dictionary, zoomAt, watermark, onWatermarkChange, onTextChange } = props
   const height = Math.round((width * 16) / 9)
   const scale = width / OUT_W
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -33,8 +53,8 @@ export function Preview916({ clip, crop, player, width, hook, zoomAt, watermark,
   const t = player.time
 
   const panes = useMemo(() => layoutPanes(layout, split, width, height), [layout, split, width, height])
-  const state = useRef({ panes, crop, zoomAt, layout })
-  state.current = { panes, crop, zoomAt, layout }
+  const state = useRef({ panes, crop, zoomAt, offset: player.offset })
+  state.current = { panes, crop, zoomAt, offset: player.offset }
 
   // desenha cada frame do vídeo no canvas
   useEffect(() => {
@@ -52,7 +72,7 @@ export function Preview916({ clip, crop, player, width, hook, zoomAt, watermark,
       if (stop) return
       if (v.videoWidth > 0) {
         const s = state.current
-        const tSrc = (clip?.previewStart ?? 0) + v.currentTime
+        const tSrc = s.offset + v.currentTime
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
         ctx.fillStyle = '#000'
         ctx.fillRect(0, 0, width, height)
@@ -69,10 +89,7 @@ export function Preview916({ clip, crop, player, width, hook, zoomAt, watermark,
     }
     const kick = (): void => {
       // pausado: redesenha ao buscar um ponto
-      if (!player.playing) {
-        stop = false
-        draw()
-      }
+      if (!player.playing) draw()
     }
     draw()
     v.addEventListener('seeked', kick)
@@ -84,7 +101,7 @@ export function Preview916({ clip, crop, player, width, hook, zoomAt, watermark,
       if ('cancelVideoFrameCallback' in v) v.cancelVideoFrameCallback(handle)
       cancelAnimationFrame(handle)
     }
-  }, [player.videoRef, player.src, player.playing, width, height, clip?.previewStart])
+  }, [player.videoRef, player.src, player.playing, width, height])
 
   // redesenha quando muda layout/recorte com o vídeo parado
   useEffect(() => {
@@ -95,40 +112,53 @@ export function Preview916({ clip, crop, player, width, hook, zoomAt, watermark,
   const cues = useMemo(() => {
     if (!clip) return []
     if (clip.cues) return clip.cues
-    return clip.words ? buildCues(clip.words, clip.cutIn, clip.cutOut) : []
-  }, [clip])
-  const cue = cues.find((c) => t >= c.start && t < c.end)
-  const wordIdx = cue ? cue.words.reduce((acc, w, i) => (w.s <= t ? i : acc), 0) : -1
+    return clip.words ? applyDictionary(buildCues(clip.words, clip.cutIn, clip.cutOut), dictionary) : []
+  }, [clip, dictionary])
+  const cue = cues.find((c) => t >= c.start && t < c.end) ?? null
+  const sampleCue = cues[0] ?? SAMPLE_CUE
+  const editing = !!onTextChange && !player.playing
 
-  const showHook = !!hook && !!clip && t - clip.cutIn < HOOK_SECONDS && t >= clip.cutIn - 0.1
-  const anchor = captionAnchor(layout, split)
   const dur = clip ? clip.cutOut - clip.cutIn : 0
   const pos = clip ? Math.max(0, Math.min(1, (t - clip.cutIn) / Math.max(0.1, dur))) : 0
   const zoomMark = clip && zoomAt != null ? (zoomAt - clip.cutIn) / Math.max(0.1, dur) : null
 
-  // ---- marca d'água arrastável ----
-  const drag = useRef<{ mode: 'move' | 'resize'; sx: number; sy: number; o: Watermark } | null>(null)
+  // ---- marca d'água/logo arrastável ----
+  // no modo "acima da legenda": arrastar muda o espaço até a legenda e o deslocamento lateral
+  const drag = useRef<{ mode: 'move' | 'resize'; sx: number; sy: number; o: Watermark; last: Watermark } | null>(null)
   const wmRatio = watermark.imgH / Math.max(1, watermark.imgW)
+  const wmBox = watermarkBox(watermark, captionStyle)
   const clampWm = (w: Watermark): Watermark => {
-    const ww = Math.max(60, Math.min(OUT_W, w.w))
+    const ww = Math.round(Math.max(60, Math.min(OUT_W, w.w)))
+    if (w.anchor === 'caption') {
+      return { ...w, w: ww, gap: Math.round(Math.max(0, Math.min(1200, w.gap))), offsetX: Math.round(Math.max(-OUT_W / 2, Math.min(OUT_W / 2, w.offsetX))) }
+    }
     const hh = ww * wmRatio
-    return { ...w, w: Math.round(ww), x: Math.round(Math.max(0, Math.min(OUT_W - ww, w.x))), y: Math.round(Math.max(0, Math.min(1920 - hh, w.y))) }
+    return { ...w, w: ww, x: Math.round(Math.max(0, Math.min(OUT_W - ww, w.x))), y: Math.round(Math.max(0, Math.min(1920 - hh, w.y))) }
   }
   const startDrag = (mode: 'move' | 'resize') => (e: RPointerEvent) => {
     if (!onWatermarkChange) return
     e.stopPropagation()
-    ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
-    drag.current = { mode, sx: e.clientX, sy: e.clientY, o: watermark }
+    capturePointer(e)
+    drag.current = { mode, sx: e.clientX, sy: e.clientY, o: watermark, last: watermark }
   }
   const onMove = (e: RPointerEvent): void => {
     const d = drag.current
     if (!d || !onWatermarkChange) return
     const dx = (e.clientX - d.sx) / scale
     const dy = (e.clientY - d.sy) / scale
-    onWatermarkChange(clampWm(d.mode === 'move' ? { ...d.o, x: d.o.x + dx, y: d.o.y + dy } : { ...d.o, w: d.o.w + dx }), false)
+    let next: Watermark
+    if (d.mode === 'resize') next = { ...d.o, w: d.o.w + dx }
+    else if (d.o.anchor === 'caption') {
+      // subir aumenta o espaço até a legenda; não dá pra descer por cima dela (gap >= 0)
+      let off = d.o.offsetX + dx
+      if (Math.abs(off) < 14) off = 0
+      next = { ...d.o, offsetX: off, gap: d.o.gap - dy }
+    } else next = { ...d.o, x: d.o.x + dx, y: d.o.y + dy }
+    d.last = clampWm(next)
+    onWatermarkChange(d.last, false)
   }
   const onUp = (): void => {
-    if (drag.current && onWatermarkChange) onWatermarkChange(watermark, true)
+    if (drag.current && onWatermarkChange) onWatermarkChange(drag.current.last, true)
     drag.current = null
   }
 
@@ -136,67 +166,47 @@ export function Preview916({ clip, crop, player, width, hook, zoomAt, watermark,
   const hasVideo = !!player.src
 
   return (
-    <div
-      className="p916"
-      style={{ width, height }}
-      onPointerMove={onMove}
-      onPointerUp={onUp}
-      onPointerCancel={onUp}
-    >
+    <div className="p916" style={{ width, height }} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp}>
       <video ref={player.videoRef} src={player.src ?? undefined} preload="auto" playsInline className="p916-video" />
       {hasVideo ? (
         <canvas ref={canvasRef} className="p916-canvas" style={{ width, height }} onClick={player.toggle} />
       ) : (
         <div className="p916-placeholder" onClick={player.toggle}>
           {panes.map((p) => (
-            <div
-              key={p.kind}
-              className={`p916-pane ${p.kind}`}
-              style={{ top: p.out.y, height: p.out.h }}
-            >
+            <div key={p.kind} className={`p916-pane ${p.kind}`} style={{ top: p.out.y, height: p.out.h }}>
               <Icon name={p.kind === 'cam' ? 'user' : 'crosshair'} size={48} strokeWidth={1.4} />
               <span>{p.kind === 'cam' ? 'WEBCAM' : 'GAMEPLAY'}</span>
             </div>
           ))}
-          {clip && (
-            <div className="p916-wait">
-              <span className="spinner" /> Gerando preview…
-            </div>
-          )}
+        </div>
+      )}
+      {clip && player.loadingPreview && (
+        <div className="p916-wait">
+          <span className="spinner" /> {hasVideo ? 'Atualizando preview…' : 'Gerando preview…'}
         </div>
       )}
 
-      {showHook && (
-        <div className="p916-hook" style={{ top: (130 / 1920) * height, fontSize: (60 / 1920) * height, padding: `${22 * scale}px ${26 * scale}px` }}>
-          {stripEmoji(hook!).toLocaleUpperCase('pt-BR')}
-        </div>
-      )}
-
-      {cue && (
-        <div
-          className="p916-caption"
-          style={{
-            top: ((anchor * 1920 + 40) / 1920) * height,
-            fontSize: (84 / 1920) * height,
-            WebkitTextStroke: `${Math.max(2, 14 * scale)}px #000`
-          }}
-        >
-          {cue.words.map((w, i) => (
-            <span key={i} className={i === wordIdx ? 'hl' : undefined}>
-              {stripEmoji(w.w).toLocaleUpperCase('pt-BR')}{' '}
-            </span>
-          ))}
-        </div>
-      )}
+      <TextLayer
+        width={width}
+        caption={captionStyle}
+        hook={hookStyle}
+        hookText={hookText}
+        cue={cue}
+        sampleCue={sampleCue}
+        t={t}
+        clipStart={clip?.cutIn ?? 0}
+        editing={editing}
+        onChange={onTextChange}
+      />
 
       {watermark.enabled && (
         <div
           className={`p916-wm${onWatermarkChange ? ' editable' : ''}`}
           style={{
-            left: watermark.x * scale,
-            top: watermark.y * scale,
-            width: watermark.w * scale,
-            height: watermark.w * wmRatio * scale
+            left: wmBox.x * scale,
+            top: wmBox.y * scale,
+            width: wmBox.w * scale,
+            height: wmBox.h * scale
           }}
           onPointerDown={startDrag('move')}
         >

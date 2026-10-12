@@ -1,13 +1,15 @@
 // Fila de render final (1080×1920, a partir do arquivo original, na GPU quando dá).
 
-import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { copyFileSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { basename, join } from 'node:path'
+import { captionStyleFor, DEFAULT_FONT, hookStyleFor, watermarkBox } from '@shared/text'
+import { findFont } from '../fonts'
 import { clipName, hookText, markStale, mutateClip, rebuildCues, zoomMoment } from '../clips'
 import { ffmpegPath, videoEncoder } from '../components'
 import { clipsRepo, projectsRepo } from '../db'
 import { renderArgs, type RenderConfig } from '../ffmpeg/args'
 import { renderTracks } from '../ffmpeg/probe'
-import { ensureDir, fontsDir } from '../paths'
+import { ensureDir } from '../paths'
 import { CanceledError, ffmpegProgress, runProcess, type RunHandle } from '../proc'
 import { getSettings } from '../settings'
 import { buildAss } from './ass'
@@ -109,10 +111,14 @@ async function pump(): Promise<void> {
   }
 }
 
-function copyFonts(dir: string): void {
-  const out = ensureDir(join(dir, 'fonts'))
-  for (const f of readdirSync(fontsDir())) {
-    if (/\.(ttf|otf)$/i.test(f) && !existsSync(join(out, f))) copyFileSync(join(fontsDir(), f), join(out, f))
+/** Copia pro diretório do render só as fontes usadas (o libass procura em `fonts/`). */
+function copyFonts(dir: string, families: string[]): void {
+  const out = join(dir, 'fonts')
+  rmSync(out, { recursive: true, force: true })
+  ensureDir(out)
+  for (const fam of new Set(families)) {
+    const f = findFont(fam) ?? findFont(DEFAULT_FONT)
+    if (f) copyFileSync(f.file, join(out, basename(f.file)))
   }
 }
 
@@ -121,18 +127,33 @@ export async function buildRenderConfig(clip: Clip, workDir: string, out: string
   if (!p?.source) throw new Error('Projeto sem informações do arquivo.')
   const s = getSettings()
   const cues = clip.cues ?? rebuildCues(clip) ?? []
+  const caption = captionStyleFor(clip, s.text)
+  const hookStyle = hookStyleFor(clip, s.text)
+  // fonte que sumiu (arquivo apagado) cai na padrão, pra não sair com fonte do sistema
+  if (!findFont(caption.font)) caption.font = DEFAULT_FONT
+  if (!findFont(hookStyle.font)) hookStyle.font = DEFAULT_FONT
   writeFileSync(
     join(workDir, 'sub.ass'),
-    buildAss({ cues, hook: hookText(clip), cutIn: clip.cutIn, cutOut: clip.cutOut, layout: clip.layout, camSplit: clip.camSplit }),
+    buildAss({
+      cues,
+      hook: hookText(clip),
+      cutIn: clip.cutIn,
+      cutOut: clip.cutOut,
+      caption,
+      hookStyle,
+      isBold: (fam) => findFont(fam)?.bold ?? false
+    }),
     'utf8'
   )
-  copyFonts(workDir)
+  copyFonts(workDir, [caption.font, hookStyle.font])
 
   const wm = clip.watermark ?? s.watermark
   let watermark: RenderConfig['watermark'] = null
   if (wm.enabled && wm.path && existsSync(wm.path)) {
     copyFileSync(wm.path, join(workDir, 'wm.png'))
-    watermark = { file: 'wm.png', x: wm.x, y: wm.y, w: wm.w, opacity: wm.opacity }
+    // mesma conta do preview: no modo "acima da legenda" a logo acompanha a legenda do corte
+    const box = watermarkBox(wm, caption)
+    watermark = { file: 'wm.png', x: box.x, y: box.y, w: box.w, opacity: wm.opacity }
   }
 
   const z = zoomMoment(clip)

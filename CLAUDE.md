@@ -142,6 +142,7 @@ Ficam num arquivo de configuração (`platform-rules`), pra atualizar sem mexer 
 - Usar o **chat da live** como sinal de momento bom (picos de mensagens, "KKKK", emotes).
 - **Botão ou hotkey pra marcar clipe durante a live** (inclusive pelo painel do OBS no tablet), com prioridade máxima na lista.
 - **"Treinar" o app a editar:** biblioteca de áudios e imagens + presets de efeito (ex.: preto e branco + eco na voz + tela encolhendo pra dar sensação de distanciamento, comum quando o streamer fala algo engraçado). A LLM escolhe onde e quando aplicar e o sistema executa o preset no ponto exato.
+- **Capa do vídeo escolhida pelos frames:** igual o Instagram pede na hora de postar, mostrar uma tira de frames do corte pra escolher a capa. Escolhe uma vez no app e sai assim em todas as redes (e opção de usar o mesmo critério em todos os cortes). Na API: Instagram aceita `thumb_offset` (ms) no upload; TikTok aceita `video_cover_timestamp_ms` no post direto (no rascunho a capa é escolhida no app); Shorts não aceita capa via API (o YouTube escolhe o frame).
 
 ---
 

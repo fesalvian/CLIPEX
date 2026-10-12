@@ -4,14 +4,17 @@
 import { randomUUID } from 'node:crypto'
 import type { SchedulePreviewItem, ScheduleRequest } from '@shared/ipc'
 import { checkCaption } from '@shared/platformRules'
+import { planSlots } from '@shared/schedule'
 import type { Network, Post } from '@shared/types'
 import { emit, toast } from '../bus'
 import { cleanupRawFiles } from '../cleanup'
 import { clipName } from '../clips'
 import { clipsRepo, metricsRepo, postsRepo } from '../db'
+import { bestSlots } from '../learning'
 import { ensureRendered } from '../render/queue'
 import { Semaphore } from '../sema'
 import { platformRules } from '../settings'
+import { learnFromClip } from '../style'
 import { instagram } from './instagram'
 import { tiktok } from './tiktok'
 import type { NetworkClient } from './types'
@@ -20,7 +23,6 @@ import { youtube } from './youtube'
 export const clients: Record<Network, NetworkClient> = { instagram, tiktok, youtube }
 
 const lane = new Semaphore(1)
-const DAY = 24 * 3600 * 1000
 let timer: NodeJS.Timeout | null = null
 let metricsTimer: NodeJS.Timeout | null = null
 
@@ -30,41 +32,52 @@ function savePost(p: Post): Post {
   return p
 }
 
-function plannedTimes(req: ScheduleRequest, count: number): (string | null)[] {
-  if (!req.firstAt) return Array.from({ length: count }, () => null)
-  const t0 = new Date(req.firstAt).getTime()
-  return Array.from({ length: count }, (_, i) => new Date(req.spreadDaily ? t0 + i * DAY : t0).toISOString())
+function hhmm(d: Date): string {
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
 export function planSchedule(req: ScheduleRequest): SchedulePreviewItem[] {
   const rules = platformRules()
+  // o melhor corte sai primeiro (e fica com os melhores horários)
   const clips = req.clipIds
     .map((id) => clipsRepo.get(id))
     .filter((c): c is NonNullable<typeof c> => c !== null)
-    .sort((a, b) => a.number - b.number)
-  const times = plannedTimes(req, clips.length)
+    .sort((a, b) => (b.llm?.score ?? b.signalScore * 100) - (a.llm?.score ?? a.signalScore * 100) || a.number - b.number)
+  const start = req.firstAt ? new Date(req.firstAt) : new Date()
+  const times = planSlots({
+    count: clips.length,
+    networks: req.networks,
+    start,
+    firstNow: !req.firstAt,
+    perDay: req.perDay,
+    // 1 por dia com data/hora escolhida: sempre nesse horário
+    fixedTime: req.perDay === 1 && req.firstAt ? hhmm(start) : null,
+    slots: bestSlots(Math.max(1, req.perDay ?? 1))
+  })
   const items: SchedulePreviewItem[] = []
   clips.forEach((c, i) => {
-    for (const net of req.networks) {
+    req.networks.forEach((net, ni) => {
+      const at = times[i]?.[ni] ?? null
       const cap = c.captions?.[net] ?? { text: '', hashtags: [] }
       const warnings = checkCaption(net, cap, rules, c.cutOut - c.cutIn).warnings
       if (!c.captions?.[net]) warnings.unshift('Sem legenda gerada pra essa rede.')
       if (c.render.status !== 'done') warnings.push('O vídeo vai ser renderizado antes de postar.')
       if (net === 'tiktok') warnings.push('Vai como rascunho: você confirma e escreve a legenda no app do TikTok.')
-      if (net !== 'youtube' && times[i]) warnings.push('O Clipador precisa estar aberto (ou na bandeja) nesse horário.')
+      if (net !== 'youtube' && at) warnings.push('O Clipador precisa estar aberto (ou na bandeja) nesse horário.')
       items.push({
         clipId: c.id,
         clipName: `${clipName(c)}${c.llm?.title ? ` · ${c.llm.title}` : ''}`,
         network: net,
-        at: times[i] ?? null,
+        at: at ? at.toISOString() : null,
         title: cap.title ?? null,
         text: cap.text,
         hashtags: cap.hashtags,
         warnings
       })
-    }
+    })
   })
-  return items
+  // ordem do calendário
+  return items.sort((a, b) => (a.at ? new Date(a.at).getTime() : 0) - (b.at ? new Date(b.at).getTime() : 0))
 }
 
 export function schedulePosts(req: ScheduleRequest): Post[] {
@@ -87,6 +100,11 @@ export function schedulePosts(req: ScheduleRequest): Post[] {
       postedAt: null
     })
   )
+  // o que vai ser postado (já editado) vira exemplo do jeito de escrever do streamer
+  for (const id of new Set(created.map((p) => p.clipId))) {
+    const c = clipsRepo.get(id)
+    if (c) learnFromClip(c, req.networks)
+  }
   setTimeout(() => void tick(), 500)
   return created
 }
@@ -119,9 +137,14 @@ async function publishPost(post: Post): Promise<void> {
       status,
       remoteId: r.remoteId,
       url: r.url,
+      note: r.note ?? null,
       postedAt: status === 'posted' ? new Date().toISOString() : null
     })
     const label = { instagram: 'Instagram', tiktok: 'TikTok', youtube: 'YouTube' }[fresh.network]
+    if (r.note) {
+      toast('info', `${clipName(clip)} foi pro ${label}. ${r.note}`)
+      return
+    }
     toast(
       'success',
       status === 'draft'

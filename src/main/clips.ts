@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { ClipPatch } from '@shared/ipc'
 import { emptyRender, MAX_CUT, MIN_CUT } from '@shared/defaults'
 import { applyDictionary, buildCues, mergeCues } from '@shared/subtitles'
+import { hookTextFor } from '@shared/text'
 import type { Clip, Project } from '@shared/types'
 import type { Candidate } from './analysis/candidates'
 import { emit } from './bus'
@@ -28,16 +29,22 @@ export function newClip(project: Project, c: Candidate, number: number, origin: 
     approved: false,
     layout: 'both',
     camSplit: 40,
-    hookChoice: 0,
+    hookChoice: null,
     hookCustom: '',
+    hookOff: false,
+    captionStyle: null,
+    hookStyle: null,
     zoomEnabled: false,
     zoomAt: null,
     words: null,
+    wordsFrom: null,
+    wordsTo: null,
     cues: null,
     captions: null,
     watermark: null,
     previewPath: null,
     previewStart: null,
+    previewEnd: null,
     prep: 'none',
     prepMessage: null,
     render: emptyRender(),
@@ -53,6 +60,9 @@ const RENDER_FIELDS: (keyof ClipPatch)[] = [
   'camSplit',
   'hookChoice',
   'hookCustom',
+  'hookOff',
+  'captionStyle',
+  'hookStyle',
   'zoomEnabled',
   'zoomAt',
   'cues',
@@ -79,14 +89,28 @@ export function markStale(c: Clip): void {
 export function updateClip(id: string, patch: ClipPatch): Clip {
   const c = clipsRepo.get(id)
   if (!c) throw new Error('Corte não encontrado')
+  const duration = projectsRepo.get(c.projectId)?.source?.durationSec ?? Math.max(c.winEnd, c.cutOut)
   const before = JSON.stringify(RENDER_FIELDS.map((k) => c[k as keyof Clip]))
   Object.assign(c, patch)
 
-  // Mantém o corte dentro da janela e com duração válida.
+  // Janela visível na timeline: pode andar pela live inteira, mantendo o tamanho.
+  if (patch.winStart !== undefined || patch.winEnd !== undefined) {
+    const span = Math.max(10, c.winEnd - c.winStart)
+    c.winStart = Math.max(0, Math.min(c.winStart, duration - span))
+    c.winEnd = Math.min(duration, c.winStart + span)
+  }
+
+  // Corte em qualquer ponto da live, com duração válida.
   if (patch.cutIn !== undefined || patch.cutOut !== undefined) {
     c.autoCut = false
-    c.cutIn = Math.max(c.winStart, Math.min(c.cutIn, c.winEnd - MIN_CUT))
-    c.cutOut = Math.max(c.cutIn + MIN_CUT, Math.min(c.cutOut, c.winEnd, c.cutIn + MAX_CUT))
+    c.cutIn = Math.max(0, Math.min(c.cutIn, duration - MIN_CUT))
+    c.cutOut = Math.max(c.cutIn + MIN_CUT, Math.min(c.cutOut, duration, c.cutIn + MAX_CUT))
+    // a janela acompanha se o corte sair dela
+    if (c.cutIn < c.winStart || c.cutOut > c.winEnd) {
+      const span = Math.max(c.winEnd - c.winStart, c.cutOut - c.cutIn + 20)
+      c.winStart = Math.max(0, Math.min(c.cutIn - 10, duration - span))
+      c.winEnd = Math.min(duration, c.winStart + span)
+    }
     // legenda acompanha o novo corte sem perder o que já foi editado
     if (c.cues && c.words && !patch.cues) c.cues = mergeCues(c.cues, c.words, c.cutIn, c.cutOut, getSettings().dictionary)
   }
@@ -107,9 +131,7 @@ export function clipName(c: Clip): string {
 }
 
 export function hookText(c: Clip): string | null {
-  if (c.hookCustom.trim()) return c.hookCustom.trim()
-  if (c.hookChoice === null) return null
-  return c.llm?.hooks[c.hookChoice] ?? null
+  return hookTextFor(c, getSettings().text)
 }
 
 /** Momento do zoom: o escolhido, ou o pico detectado se estiver dentro do corte. */

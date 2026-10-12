@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clipador · Política de privacidade</title>
+<style>
+  :root { --text: #EDEBFA; --muted: #B5B0D6; --accent: #A78BFA; --panel: rgba(255,255,255,0.04); --border: rgba(255,255,255,0.09); }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; color: var(--text); font: 17px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: #0A0F2C linear-gradient(155deg, #1E1240 0%, #12123A 38%, #0A0F2C 70%, #070918 100%) fixed; }
+  main { max-width: 760px; margin: 0 auto; padding: 56px 16px 72px; }
+  h1 { font-size: 34px; line-height: 1.15; margin: 0 0 4px; }
+  h2 { font-size: 21px; margin: 34px 0 8px; }
+  p, li { color: var(--muted); }
+  strong { color: var(--text); }
+  a { color: var(--accent); overflow-wrap: anywhere; }
+  code { font-size: 15px; color: var(--text); }
+  footer { margin-top: 48px; font-size: 15px; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <p><a href="index.html">← Clipador</a></p>
+  <h1>Política de privacidade</h1>
+  <p>Atualizada em 11 de outubro de 2026.</p>
+
+  <p>O <strong>Clipador</strong> é um app de computador de uso pessoal do Felipe Salviano. Ele roda só no computador do dono e publica só nas contas dele. Não existe servidor do Clipador: nenhum dado das contas conectadas é enviado para o desenvolvedor ou para terceiros, a não ser os envios descritos abaixo, que o próprio usuário pede.</p>
+
+  <h2>Dados que o app acessa</h2>
+  <ul>
+    <li><strong>YouTube (Google):</strong> permissões <code>youtube.upload</code>, para enviar e agendar os vídeos que o usuário aprovou, e <code>youtube.readonly</code>, para ler o nome do canal e as visualizações dos vídeos enviados pelo app.</li>
+    <li><strong>TikTok:</strong> permissões <code>user.info.basic</code> (nome da conta) e <code>video.upload</code> (enviar o vídeo como rascunho).</li>
+    <li><strong>Instagram (Meta):</strong> permissões para publicar Reels na conta profissional ligada à Página do usuário e ler as visualizações desses Reels.</li>
+  </ul>
+
+  <h2>Como os dados são usados</h2>
+  <ul>
+    <li>Publicar ou agendar os vídeos que o usuário revisou e confirmou no app.</li>
+    <li>Guardar as visualizações de cada vídeo publicado pelo app, para sugerir os melhores horários de postagem e melhorar a escolha dos próximos cortes.</li>
+  </ul>
+  <p>Os dados não são vendidos, não são usados para anúncios e não são usados para treinar modelos de IA.</p>
+
+  <h2>Onde ficam guardados</h2>
+  <p>Tudo fica no computador do usuário, na pasta de dados do app (<code>%APPDATA%\Clipador</code>). Os tokens de acesso das redes ficam criptografados pelo Windows. Os vídeos e as gravações também ficam só no computador, até serem enviados para a rede escolhida.</p>
+
+  <h2>Serviços de terceiros</h2>
+  <ul>
+    <li>A transcrição das lives é feita no próprio computador.</li>
+    <li>Se o usuário escolher o provedor <strong>OpenAI</strong> no app, o texto transcrito dos trechos é enviado à API da OpenAI para gerar notas, ganchos, legendas e hashtags. Junto vai só um resumo da média de visualizações por tipo de momento (por exemplo, "risada: média de 2 mil views"), calculado a partir das estatísticas das contas, para a IA priorizar o que tem funcionado. Não são enviados tokens, dados de identificação das contas, comentários nem dados de outras pessoas.</li>
+    <li>Com o provedor <strong>Local</strong>, nada disso sai do computador.</li>
+  </ul>
+
+  <h2>Google e YouTube</h2>
+  <p>O uso e a transferência, para qualquer outro app, de informações recebidas das APIs do Google seguem a <a href="https://developers.google.com/terms/api-services-user-data-policy">Política de Dados do Usuário dos Serviços de API do Google</a>, incluindo os requisitos de Uso Limitado.</p>
+  <p>O Clipador usa os Serviços de API do YouTube. Ao conectar o YouTube, o usuário concorda com os <a href="https://www.youtube.com/t/terms">Termos de Serviço do YouTube</a>, e o tratamento dos dados pelo Google segue a <a href="https://policies.google.com/privacy">Política de Privacidade do Google</a>.</p>
+
+  <h2>Como remover o acesso e apagar os dados</h2>
+  <ul>
+    <li>Google/YouTube: <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a> › Clipador › Remover acesso. Também dá para revogar pela <a href="https://security.google.com/settings/security/permissions">página de segurança do Google</a>.</li>
+    <li>TikTok: no app do TikTok, Configurações e privacidade › Segurança › Gerenciar permissões de apps.</li>
+    <li>Instagram/Facebook: Configurações › Integrações comerciais (ou Apps e sites) › remover o app.</li>
+    <li>Para apagar tudo que o Clipador guardou, basta apagar a pasta <code>%APPDATA%\Clipador</code>.</li>
+  </ul>
+
+  <h2>Contato</h2>
+  <p><a href="mailto:felipesalviano300@gmail.com">felipesalviano300@gmail.com</a></p>
+
+  <footer><a href="index.html">Início</a> · <a href="termos.html">Termos de uso</a></footer>
+</main>
+</body>
+</html>

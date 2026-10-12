@@ -1,7 +1,8 @@
 import { create } from 'zustand'
 import type { ClipPatch } from '@shared/ipc'
-import type { Clip, ComponentStatus, Post, Project, ProjectSummary, Settings, WatcherStatus } from '@shared/types'
+import type { Clip, ComponentStatus, FontInfo, Post, Project, ProjectSummary, Settings, WatcherStatus } from '@shared/types'
 import { call, errorText } from './api'
+import { loadFontFaces } from './lib/fonts'
 
 export type Route =
   | { name: 'home' }
@@ -25,8 +26,9 @@ interface State {
   components: ComponentStatus[]
   watcher: WatcherStatus | null
   toasts: Toast[]
-  /** waveform de cada corte (janela inteira) */
-  waves: Record<string, number[]>
+  /** volume da live inteira, 4 valores por segundo (a timeline de cada corte recorta daqui) */
+  liveWave: LiveWave | null
+  fonts: FontInfo[]
 
   go: (r: Route) => void
   openProject: (id: string, screen: 'clipar' | 'revisar') => Promise<void>
@@ -37,7 +39,8 @@ interface State {
   patchClip: (id: string, patch: ClipPatch) => Promise<void>
   /** só local (arrastar alça); depois chama patchClip */
   previewClip: (id: string, patch: Partial<Clip>) => void
-  loadWave: (c: Clip) => Promise<void>
+  loadLiveWave: (projectId: string, duration: number) => Promise<void>
+  loadFonts: () => Promise<void>
   upsertPost: (p: Post) => void
   setSettings: (s: Settings) => void
   updateSettings: (patch: Partial<Settings>) => Promise<void>
@@ -47,6 +50,14 @@ interface State {
 }
 
 let toastId = 0
+
+export const WAVE_RATE = 4
+
+export interface LiveWave {
+  projectId: string
+  rate: number
+  values: number[]
+}
 
 export const useStore = create<State>((set, get) => ({
   route: { name: 'home' },
@@ -58,13 +69,14 @@ export const useStore = create<State>((set, get) => ({
   components: [],
   watcher: null,
   toasts: [],
-  waves: {},
+  liveWave: null,
+  fonts: [],
 
   go: (route) => set({ route }),
 
   openProject: async (id, screen) => {
     const cur = get().project
-    if (cur?.id !== id) set({ project: null, clips: {}, posts: [], waves: {} })
+    if (cur?.id !== id) set({ project: null, clips: {}, posts: [], liveWave: null })
     set({ route: { name: screen, projectId: id } })
     const [project, clips, posts] = await Promise.all([call('projects:get', id), call('clips:list', id), call('posts:list', id)])
     if (!project) {
@@ -114,10 +126,18 @@ export const useStore = create<State>((set, get) => ({
     }
   },
 
-  loadWave: async (c) => {
-    if (get().waves[c.id]) return
-    const r = await call('clips:loudness', c.projectId, c.winStart, c.winEnd, 120)
-    if (r.values.length) set({ waves: { ...get().waves, [c.id]: r.values } })
+  loadLiveWave: async (projectId, duration) => {
+    const cur = get().liveWave
+    if (cur?.projectId === projectId && cur.values.length > 0) return
+    const n = Math.max(1, Math.ceil(duration * WAVE_RATE))
+    const r = await call('clips:loudness', projectId, 0, n / WAVE_RATE, n)
+    if (r.values.length) set({ liveWave: { projectId, rate: WAVE_RATE, values: r.values } })
+  },
+
+  loadFonts: async () => {
+    const fonts = await call('fonts:list')
+    set({ fonts })
+    await loadFontFaces(fonts)
   },
 
   upsertPost: (p) => {

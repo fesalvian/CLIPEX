@@ -22,6 +22,8 @@ export interface PublishResult {
   draft: boolean
   /** agendado na própria plataforma (YouTube publishAt) */
   scheduledRemotely: boolean
+  /** aviso pro usuário (ex.: subiu privado) */
+  note?: string
 }
 
 export interface NetworkClient {

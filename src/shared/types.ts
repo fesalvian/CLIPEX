@@ -69,6 +69,8 @@ export interface Project {
   proxyPath: string | null
   framePath: string | null
   crop: CropLayout
+  /** jogo da live: a IA usa nas legendas e hashtags em vez de chutar */
+  game: string | null
   status: ProjectStatus
   stages: StagesState
   error: string | null
@@ -102,15 +104,21 @@ export type Captions = Partial<Record<Network, NetCaption>>
 export interface Watermark {
   enabled: boolean
   path: string | null
-  /** tamanho original do PNG */
+  /** tamanho original do PNG (já sem as bordas transparentes) */
   imgW: number
   imgH: number
-  /** posição e largura no vídeo final (1080×1920) */
+  /** posição e largura no vídeo final (1080×1920); a posição só vale no modo livre */
   x: number
   y: number
   w: number
   /** 0..1 */
   opacity: number
+  /** 'caption': fica sempre logo acima da legenda (acompanha ela); 'free': posição fixa */
+  anchor: 'caption' | 'free'
+  /** espaço entre a logo e o topo da legenda (px), no modo 'caption' */
+  gap: number
+  /** deslocamento horizontal em relação ao centro da legenda (px), no modo 'caption' */
+  offsetX: number
 }
 
 export interface LlmInsight {
@@ -157,16 +165,26 @@ export interface Clip {
   approved: boolean
   layout: ClipLayout
   camSplit: CamSplit
+  /** sugestão da IA escolhida; null = segue o padrão das configurações */
   hookChoice: number | null
   hookCustom: string
+  /** gancho desligado só neste corte */
+  hookOff: boolean
+  /** ajustes deste corte por cima do padrão (posição arrastada no preview, etc.) */
+  captionStyle: Partial<CaptionStyle> | null
+  hookStyle: Partial<HookStyle> | null
   zoomEnabled: boolean
   zoomAt: number | null
   words: Word[] | null
+  /** trecho da live que já foi transcrito */
+  wordsFrom: number | null
+  wordsTo: number | null
   cues: SubtitleCue[] | null
   captions: Captions | null
   watermark: Watermark | null
   previewPath: string | null
   previewStart: number | null
+  previewEnd: number | null
   prep: ClipPrep
   prepMessage: string | null
   render: ClipRender
@@ -176,6 +194,83 @@ export interface Clip {
 export interface DictEntry {
   term: string
   variants: string[]
+}
+
+export type CaptionAnim = 'none' | 'pop' | 'fade' | 'bounce' | 'reveal'
+export type HookAnim = 'none' | 'fade' | 'pop' | 'slide' | 'typewriter'
+
+/** Estilo de um texto queimado no vídeo. Medidas em pixels do vídeo final (1080×1920). */
+export interface TextStyleBase {
+  enabled: boolean
+  /** nome da família da fonte (bate com o nome dentro do arquivo .ttf/.otf) */
+  font: string
+  size: number
+  color: string
+  outlineColor: string
+  outlineWidth: number
+  uppercase: boolean
+  /** centro do texto; null em `y` da legenda = automático (logo abaixo da webcam) */
+  x: number
+  y: number | null
+  /** largura da área onde o texto pode crescer antes de quebrar linha (px) */
+  boxWidth: number
+}
+
+export interface CaptionStyle extends TextStyleBase {
+  /** cor da palavra que está sendo falada */
+  highlight: string
+  shadow: boolean
+  animation: CaptionAnim
+}
+
+export interface HookStyle extends TextStyleBase {
+  /** caixa de fundo atrás do texto */
+  box: boolean
+  boxColor: string
+  animation: HookAnim
+  /** segundos na tela */
+  duration: number
+  /** texto padrão: sugestão da IA ou um texto fixo igual pra todos os cortes */
+  mode: 'ai' | 'fixed'
+  fixedText: string
+}
+
+export interface TextDefaults {
+  caption: CaptionStyle
+  hook: HookStyle
+}
+
+/** Como o streamer escreve: vai pro prompt da IA nas legendas das redes e nos ganchos. */
+export interface WritingStyle {
+  /** jeito de escrever, em texto livre (ex.: "falo 'chat', uso kkkk, nada de emoji") */
+  notes: string
+  /** palavras e frases que não quer ver (ex.: "épico, insano, você não vai acreditar") */
+  avoid: string
+  /** guardar como exemplo o que for postado/baixado (depois de editado) */
+  learn: boolean
+  /** jogo que mais joga: entra como padrão nos projetos novos */
+  defaultGame: string
+}
+
+export type StyleExampleKind = 'hook' | 'caption'
+
+export interface StyleExample {
+  id: string
+  kind: StyleExampleKind
+  /** rede da legenda; null = vale pra todas */
+  network: Network | null
+  text: string
+  title?: string
+  hashtags: string[]
+  source: 'manual' | 'posted'
+  createdAt: string
+}
+
+export interface FontInfo {
+  family: string
+  file: string
+  source: 'bundled' | 'user'
+  bold: boolean
 }
 
 export interface Accounts {
@@ -201,6 +296,8 @@ export interface Settings {
   windowSec: number
   maxCandidates: number
   accounts: Accounts
+  text: TextDefaults
+  style: WritingStyle
 }
 
 export type PostStatus = 'scheduled' | 'uploading' | 'posted' | 'draft' | 'failed' | 'canceled'
@@ -218,6 +315,8 @@ export interface Post {
   remoteId: string | null
   url: string | null
   error: string | null
+  /** aviso da rede depois de postar (ex.: YouTube travou como privado) */
+  note?: string | null
   createdAt: string
   postedAt: string | null
 }

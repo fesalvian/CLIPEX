@@ -114,7 +114,7 @@ describe('outros comandos', () => {
 
   it('preview do candidato é 360p com keyframe curto', () => {
     const a = previewSegmentArgs({ src: 'in.mkv', start: 100, duration: 90, audioTrack: 0, out: 'p.mp4', encoder: 'x264' })
-    expect(a).toContain('scale=-2:360,fps=30')
+    expect(a).toContain('fps=30,scale=-2:360:flags=fast_bilinear')
     expect(a).toContain('libx264')
     expect(a.slice(a.indexOf('-g'), a.indexOf('-g') + 2)).toEqual(['-g', '15'])
   })

@@ -20,6 +20,7 @@ export function App() {
     ]).then(([projects, settings, components, watcher]) => {
       useStore.setState({ projects, settings, components, watcher })
     })
+    void useStore.getState().loadFonts()
   }, [])
 
   useApiEvent('projects:changed', (projects) => useStore.setState({ projects }))

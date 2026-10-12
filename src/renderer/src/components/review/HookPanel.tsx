@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { hookTextFor } from '@shared/text'
 import type { Clip, LlmProvider } from '@shared/types'
 import { call, errorText } from '../../api'
 import { useStore } from '../../store'
@@ -13,12 +14,21 @@ interface Props {
 export function HookPanel({ clip, provider, onProvider }: Props) {
   const patchClip = useStore((s) => s.patchClip)
   const toast = useStore((s) => s.toast)
+  const defaults = useStore((s) => s.settings?.text)
+  const go = useStore((s) => s.go)
   const [custom, setCustom] = useState(clip.hookCustom)
   const [busy, setBusy] = useState(false)
   useEffect(() => setCustom(clip.hookCustom), [clip.id, clip.hookCustom])
+  if (!defaults) return null
 
   const hooks = clip.llm?.hooks ?? []
   const usingCustom = clip.hookCustom.trim().length > 0
+  const shown = hookTextFor(clip, defaults)
+  // texto fixo só vale se tiver algo escrito; vazio = cai na sugestão da IA
+  const fixedMode = defaults.hook.mode === 'fixed' && defaults.hook.fixedText.trim().length > 0
+  // qual sugestão está valendo (escolhida, ou a primeira quando o padrão é a IA)
+  const activeIdx = clip.hookOff || usingCustom ? -1 : (clip.hookChoice ?? (fixedMode ? -1 : 0))
+  const fixedActive = !clip.hookOff && !usingCustom && clip.hookChoice === null && fixedMode
 
   const regenerate = async (): Promise<void> => {
     setBusy(true)
@@ -43,11 +53,33 @@ export function HookPanel({ clip, provider, onProvider }: Props) {
           ))}
         </div>
       </div>
-      <span className="hint">Sugestões da IA a partir da transcrição do corte. Aparece nos primeiros 3 segundos.</span>
+      <span className="hint">
+        Sugestões da IA a partir da transcrição do corte. Aparece nos primeiros {defaults.hook.duration} segundos.
+      </span>
+      {!defaults.hook.enabled && (
+        <div className="callout warn">
+          <Icon name="info" color="#FFC48A" />
+          <span>
+            O texto inicial está desligado no padrão.{' '}
+            <button className="link-btn" onClick={() => go({ name: 'settings' })}>
+              Ligar em Configurações
+            </button>
+          </span>
+        </div>
+      )}
 
-      {hooks.length === 0 && <span className="hint">{clip.words ? 'Sem sugestões ainda. Gere abaixo.' : 'Esperando a transcrição do corte.'}</span>}
+      {fixedActive && (
+        <div className="hook-opt on" aria-pressed>
+          <span className="radio" />
+          <span style={{ flexGrow: 1, textAlign: 'left' }}>{shown}</span>
+          <span className="hint">texto padrão</span>
+        </div>
+      )}
+      {hooks.length === 0 && !fixedActive && (
+        <span className="hint">{clip.words ? 'Sem sugestões ainda. Gere abaixo.' : 'Esperando a transcrição do corte.'}</span>
+      )}
       {hooks.map((h, i) => {
-        const on = !usingCustom && clip.hookChoice === i
+        const on = activeIdx === i
         return (
           <button
             key={i}
@@ -55,7 +87,7 @@ export function HookPanel({ clip, provider, onProvider }: Props) {
             aria-pressed={on}
             onClick={() => {
               setCustom('')
-              void patchClip(clip.id, { hookChoice: i, hookCustom: '' })
+              void patchClip(clip.id, { hookChoice: i, hookCustom: '', hookOff: false })
             }}
           >
             <span className="radio" />
@@ -70,10 +102,10 @@ export function HookPanel({ clip, provider, onProvider }: Props) {
           className="input"
           placeholder="Seu gancho aqui"
           value={custom}
-          maxLength={60}
+          maxLength={70}
           onChange={(e) => setCustom(e.target.value)}
           onBlur={() => {
-            if (custom !== clip.hookCustom) void patchClip(clip.id, { hookCustom: custom })
+            if (custom !== clip.hookCustom) void patchClip(clip.id, { hookCustom: custom, hookOff: false })
           }}
           onKeyDown={(e) => {
             if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
@@ -85,17 +117,29 @@ export function HookPanel({ clip, provider, onProvider }: Props) {
           {busy ? <span className="spinner" /> : <Icon name="refresh" size={14} />}
           Gerar outras
         </button>
-        {(usingCustom || clip.hookChoice !== null) && (
+        {shown && (
           <button
             className="btn sm ghost"
-            onClick={() => {
-              setCustom('')
-              void patchClip(clip.id, { hookChoice: null, hookCustom: '' })
-            }}
+            title="A IA passa a usar este gancho como referência de como você escreve"
+            onClick={() =>
+              void call('style:add', { kind: 'hook', network: null, text: shown, hashtags: [], source: 'manual' }).then(() =>
+                toast('success', 'Gancho guardado como exemplo do seu jeito.')
+              )
+            }
           >
-            Sem gancho
+            <Icon name="sparkle" size={14} /> Guardar como exemplo
           </button>
         )}
+        <button
+          className={`btn sm${clip.hookOff ? ' soft' : ' ghost'}`}
+          aria-pressed={clip.hookOff}
+          onClick={() => {
+            setCustom('')
+            void patchClip(clip.id, clip.hookOff ? { hookOff: false } : { hookOff: true, hookCustom: '' })
+          }}
+        >
+          {clip.hookOff ? 'Sem gancho neste corte (ligar de novo)' : 'Sem gancho'}
+        </button>
       </div>
     </div>
   )

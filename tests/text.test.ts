@@ -6,7 +6,8 @@ import { checkCaption, enforceCaption, type PlatformRules } from '@shared/platfo
 import { applyDictionary, buildCues, findDictFixes, mergeCues, retimeCue } from '@shared/subtitles'
 import { fmtClock, fmtDur, fmtTotal, parseLiveDate, projectNameFromDate } from '@shared/time'
 import { coverCrop, layoutPanes } from '@shared/geometry'
-import type { Word } from '@shared/types'
+import type { CaptionStyle, HookStyle, Word } from '@shared/types'
+import { captionStyleFor, DEFAULT_TEXT, hookStyleFor } from '@shared/text'
 
 const R = rules as PlatformRules
 
@@ -85,15 +86,94 @@ describe('ASS', () => {
     expect(assEscape('a {b} c\\d')).toBe('a (b) c/d')
   })
 
+  // estilo fixo de teste (não depende do padrão do canal, que pode mudar)
+  const BASE_CAP: CaptionStyle = {
+    ...DEFAULT_TEXT.caption,
+    highlight: '#C4B5FD',
+    y: null,
+    boxWidth: 940
+  }
+  const BASE_HOOK: HookStyle = {
+    ...DEFAULT_TEXT.hook,
+    font: 'Montserrat ExtraBold',
+    size: 60,
+    color: '#12123A',
+    box: true,
+    boxColor: '#FFFFFF',
+    outlineWidth: 0,
+    x: 540,
+    y: 210,
+    boxWidth: 900,
+    duration: 3
+  }
+  const styles = (cap: Partial<CaptionStyle> = {}, hook: Partial<HookStyle> = {}) => {
+    const d = { caption: { ...BASE_CAP, ...cap }, hook: { ...BASE_HOOK, ...hook } }
+    const clip = { captionStyle: null, hookStyle: null, layout: 'both' as const, camSplit: 40 as const }
+    return { caption: captionStyleFor(clip, d), hookStyle: hookStyleFor(clip, d) }
+  }
+
+  it('padrão do canal: o estilo que o Felipe montou', () => {
+    expect(DEFAULT_TEXT.caption).toMatchObject({ font: 'Montserrat ExtraBold', size: 84, highlight: '#4DFF00', outlineWidth: 7, y: 1580, animation: 'pop' })
+    expect(DEFAULT_TEXT.hook).toMatchObject({ font: 'Luckiest Guy', size: 66, color: '#FFFFFF', box: false, outlineWidth: 6, x: 513, y: 769, duration: 8 })
+  })
+
+  it('a área do texto limita a quebra de linha pelas margens da linha', () => {
+    const ass = buildAss({ cues: buildCues(words, 100, 110), hook: 'oi', cutIn: 100, cutOut: 110, ...styles({ boxWidth: 600 }, { boxWidth: 400 }) })
+    expect(dialogues(ass, 'Caption')[0]).toContain(',Caption,,240,240,0,,')
+    expect(dialogues(ass, 'Hook')[0]).toContain(',Hook,,340,340,0,,')
+  })
+  const dialogues = (ass: string, style: string) => ass.split('\n').filter((l) => l.includes(`,${style},`) && l.startsWith('Dialogue'))
+
   it('gera gancho nos 3 primeiros segundos e uma linha por palavra destacada', () => {
     const cues = buildCues(words, 100, 110)
-    const ass = buildAss({ cues, hook: 'ele não sabia', cutIn: 100, cutOut: 110, layout: 'both', camSplit: 40 })
-    expect(ass).toContain('Dialogue: 2,0:00:00.00,0:00:03.00,Hook,,0,0,0,,ELE NÃO SABIA')
-    const lines = ass.split('\n').filter((l) => l.includes(',Caption,'))
+    const ass = buildAss({ cues, hook: 'ele não sabia', cutIn: 100, cutOut: 110, ...styles({ animation: 'none' }, { animation: 'none' }) })
+    expect(ass).toContain('Dialogue: 2,0:00:00.00,0:00:03.00,Hook,,90,90,0,,{\\an5\\pos(540,210)}ELE NÃO SABIA')
+    const lines = dialogues(ass, 'Caption')
     expect(lines).toHaveLength(11)
-    expect(lines[0]).toContain('{\\c&H00FDB5C4}MANO{\\c&H00FFFFFF} MANO OLHA ALI')
-    // legenda logo abaixo da webcam (40% de 1920 + 40)
-    expect(ass).toMatch(/Style: Caption,.*,8,70,70,808,1/)
+    // legenda presa pelo topo: 1ª linha centrada logo abaixo da webcam, as outras crescem pra baixo
+    expect(lines[0]).toContain('{\\an8\\pos(540,808)}{\\c&H00FDB5C4}MANO{\\c&H00FFFFFF} MANO OLHA ALI')
+  })
+
+  it('posição, fonte e cores vêm do estilo', () => {
+    const ass = buildAss({
+      cues: buildCues(words, 100, 110),
+      hook: 'oi',
+      cutIn: 100,
+      cutOut: 110,
+      ...styles({ x: 300, y: 1500, font: 'Anton', color: '#FFFF00', size: 100 }, { y: 400, box: false, outlineWidth: 5 }),
+      isBold: () => true
+    })
+    expect(ass).toMatch(/Style: Caption,Anton,100,&H0000FFFF,&H0000FFFF,&H00000000,&H90000000,-1,/)
+    expect(dialogues(ass, 'Caption')[0]).toContain('\\an8\\pos(300,1440)')
+    // sem caixa: BorderStyle 1 com contorno 5
+    expect(ass).toMatch(/Style: Hook,.*,0,0,1,5,0,5,90,90,0,1/)
+    expect(dialogues(ass, 'Hook')[0]).toContain('\\pos(540,400)')
+  })
+
+  it('animações da legenda', () => {
+    const cues = buildCues(words, 100, 110)
+    const pop = dialogues(buildAss({ cues, hook: null, cutIn: 100, cutOut: 110, ...styles({ animation: 'pop' }) }), 'Caption')
+    expect(pop[0]).toContain('\\fscx70\\fscy70\\t(0,120,\\fscx108\\fscy108)')
+    expect(pop[1]).not.toContain('\\t(')
+    const reveal = dialogues(buildAss({ cues, hook: null, cutIn: 100, cutOut: 110, ...styles({ animation: 'reveal' }) }), 'Caption')
+    expect(reveal[0]).toMatch(/\}MANO\{[^}]*\}$/)
+    expect(reveal[1]).toContain('MANO {\\c&H00FDB5C4}MANO')
+    const bounce = dialogues(buildAss({ cues, hook: null, cutIn: 100, cutOut: 110, ...styles({ animation: 'bounce' }) }), 'Caption')
+    expect(bounce[0]).toContain('\\t(0,90,\\fscx118\\fscy118)}MANO{')
+  })
+
+  it('legenda desligada não gera linhas; gancho máquina de escrever usa karaokê', () => {
+    const ass = buildAss({
+      cues: buildCues(words, 100, 110),
+      hook: 'abc',
+      cutIn: 100,
+      cutOut: 110,
+      ...styles({ enabled: false }, { animation: 'typewriter' })
+    })
+    expect(dialogues(ass, 'Caption')).toHaveLength(0)
+    expect(dialogues(ass, 'Hook')[0]).toContain('{\\ko5}A{\\ko5}B{\\ko5}C')
+    // cor secundária transparente: letra ainda não "digitada" não aparece
+    expect(ass).toMatch(/Style: Hook,[^,]+,60,&H003A1212,&HFF3A1212,/)
   })
 })
 
