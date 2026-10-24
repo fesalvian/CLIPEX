@@ -1,4 +1,4 @@
-import type { DictEntry, SubtitleCue, Word } from './types'
+import type { Cut, DictEntry, SubtitleCue, Word } from './types'
 
 export interface CueOptions {
   maxWords: number
@@ -89,6 +89,16 @@ export function mergeCues(existing: SubtitleCue[], words: Word[], from: number, 
   return [...kept, ...fresh]
     .sort((a, b) => a.start - b.start)
     .map((c, i) => ({ ...c, id: `c${i}` }))
+}
+
+/** Legenda de um corte com vários trechos: cada trecho tem os seus (nenhum atravessa o corte seco). */
+export function buildCuesInCuts(words: Word[], cuts: Cut[], opts: Partial<CueOptions> = {}): SubtitleCue[] {
+  return cuts.flatMap((k) => buildCues(words, k.s, k.e, opts)).map((c, i) => ({ ...c, id: `c${i}` }))
+}
+
+/** `mergeCues` trecho a trecho: mantém o que já foi editado e gera o que entrou de novo. */
+export function mergeCuesInCuts(existing: SubtitleCue[], words: Word[], cuts: Cut[], dict: DictEntry[]): SubtitleCue[] {
+  return cuts.flatMap((k) => mergeCues(existing, words, k.s, k.e, dict)).map((c, i) => ({ ...c, id: `c${i}` }))
 }
 
 export function cueText(cue: SubtitleCue): string {

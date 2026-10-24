@@ -3,6 +3,7 @@
 import { copyFileSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { captionStyleFor, DEFAULT_FONT, hookStyleFor, watermarkBox } from '@shared/text'
+import { clipDuration, cutsOf, toOut } from '@shared/cuts'
 import { findFont } from '../fonts'
 import { clipName, hookText, markStale, mutateClip, rebuildCues, zoomMoment } from '../clips'
 import { ffmpegPath, videoEncoder } from '../components'
@@ -46,6 +47,12 @@ export function outputName(c: Clip): string {
 
 /** Põe o corte na fila (ou devolve a promessa do que já está na fila). */
 export function enqueueRender(clipId: string): Promise<Clip> {
+  const c = clipsRepo.get(clipId)
+  if (c && lastRenderWithoutRaw(c)) {
+    // um erro de antes ("bruto não existe mais") volta a ser só desatualizado
+    const kept = c.render.status === 'error' ? mutateClip(clipId, (x) => (x.render = { ...x.render, status: 'stale', error: null })) : c
+    return Promise.resolve(kept ?? c)
+  }
   return new Promise<Clip>((resolve, reject) => {
     const existing = queue.find((q) => q.clipId === clipId)
     if (existing) {
@@ -75,6 +82,16 @@ export async function ensureRendered(clipId: string): Promise<Clip> {
   if (!c) throw new Error('Corte não encontrado')
   if (c.render.status === 'done' && c.render.path && existsSync(c.render.path)) return c
   return enqueueRender(clipId)
+}
+
+/**
+ * Bruto da live apagado mas o vídeo final ainda existe: não dá pra renderizar de novo, então
+ * vale a última versão gerada (postagem e download continuam funcionando).
+ */
+function lastRenderWithoutRaw(c: Clip): boolean {
+  if (!c.render.path || !existsSync(c.render.path)) return false
+  const p = projectsRepo.get(c.projectId)
+  return !!p && !existsSync(p.sourcePath)
 }
 
 export function cancelRender(clipId: string): void {
@@ -139,6 +156,7 @@ export async function buildRenderConfig(clip: Clip, workDir: string, out: string
       hook: hookText(clip),
       cutIn: clip.cutIn,
       cutOut: clip.cutOut,
+      cuts: cutsOf(clip),
       caption,
       hookStyle,
       isBold: (fam) => findFont(fam)?.bold ?? false
@@ -157,7 +175,7 @@ export async function buildRenderConfig(clip: Clip, workDir: string, out: string
   }
 
   const z = zoomMoment(clip)
-  const zoom = z !== null ? { at: Math.max(0, z - clip.cutIn - ZOOM.lead), duration: ZOOM.duration, factor: ZOOM.factor } : null
+  const zoom = z !== null ? { at: Math.max(0, toOut(cutsOf(clip), z) - ZOOM.lead), duration: ZOOM.duration, factor: ZOOM.factor } : null
   const tracks = renderTracks(p.source)
   return {
     src: p.sourcePath,
@@ -166,9 +184,10 @@ export async function buildRenderConfig(clip: Clip, workDir: string, out: string
     srcFps: p.source.fps,
     cutIn: clip.cutIn,
     cutOut: clip.cutOut,
+    keep: cutsOf(clip).map((k) => ({ s: k.s - clip.cutIn, e: k.e - clip.cutIn })),
     layout: clip.layout,
     camSplit: clip.camSplit,
-    crop: p.crop,
+    crop: clip.crop ?? p.crop,
     zoom,
     subtitles: 'sub.ass',
     fontsDir: 'fonts',
@@ -198,7 +217,7 @@ async function renderClip(clipId: string): Promise<Clip> {
   })
   try {
     const cfg = await buildRenderConfig(clip, workDir, 'out.mp4')
-    const dur = clip.cutOut - clip.cutIn
+    const dur = clipDuration(clip)
     let last = 0
     const handle = runProcess(ffmpegPath(), renderArgs(cfg), {
       cwd: workDir,

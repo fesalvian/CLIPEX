@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto'
 import type { ClipPatch } from '@shared/ipc'
 import { emptyRender, MAX_CUT, MIN_CUT } from '@shared/defaults'
-import { applyDictionary, buildCues, mergeCues } from '@shared/subtitles'
-import { hookTextFor } from '@shared/text'
+import { cutIndexAt, cutsOf, normalizeCuts, withCuts, zoomPoint } from '@shared/cuts'
+import { applyDictionary, buildCuesInCuts, mergeCuesInCuts } from '@shared/subtitles'
+import { clipTitle, hookTextFor } from '@shared/text'
 import type { Clip, Project } from '@shared/types'
 import type { Candidate } from './analysis/candidates'
 import { emit } from './bus'
@@ -20,6 +21,7 @@ export function newClip(project: Project, c: Candidate, number: number, origin: 
     winEnd: c.winEnd,
     cutIn: c.cutIn,
     cutOut: c.cutOut,
+    segments: [{ s: c.cutIn, e: c.cutOut }],
     autoCut: origin === 'auto',
     signalScore: c.score,
     tags: c.tags,
@@ -29,6 +31,7 @@ export function newClip(project: Project, c: Candidate, number: number, origin: 
     approved: false,
     layout: 'both',
     camSplit: 40,
+    crop: null,
     hookChoice: null,
     hookCustom: '',
     hookOff: false,
@@ -56,8 +59,10 @@ export function newClip(project: Project, c: Candidate, number: number, origin: 
 const RENDER_FIELDS: (keyof ClipPatch)[] = [
   'cutIn',
   'cutOut',
+  'segments',
   'layout',
   'camSplit',
+  'crop',
   'hookChoice',
   'hookCustom',
   'hookOff',
@@ -100,11 +105,17 @@ export function updateClip(id: string, patch: ClipPatch): Clip {
     c.winEnd = Math.min(duration, c.winStart + span)
   }
 
-  // Corte em qualquer ponto da live, com duração válida.
-  if (patch.cutIn !== undefined || patch.cutOut !== undefined) {
+  // Trechos em qualquer ponto da live, com duração válida. Só início/fim (corte de um trecho
+  // só, ou a IA sugerindo) vira um trecho único.
+  if (patch.segments !== undefined || patch.cutIn !== undefined || patch.cutOut !== undefined) {
     c.autoCut = false
-    c.cutIn = Math.max(0, Math.min(c.cutIn, duration - MIN_CUT))
-    c.cutOut = Math.max(c.cutIn + MIN_CUT, Math.min(c.cutOut, duration, c.cutIn + MAX_CUT))
+    if (patch.segments !== undefined) {
+      Object.assign(c, withCuts(normalizeCuts(patch.segments, duration)))
+    } else {
+      c.cutIn = Math.max(0, Math.min(c.cutIn, duration - MIN_CUT))
+      c.cutOut = Math.max(c.cutIn + MIN_CUT, Math.min(c.cutOut, duration, c.cutIn + MAX_CUT))
+      c.segments = [{ s: c.cutIn, e: c.cutOut }]
+    }
     // a janela acompanha se o corte sair dela
     if (c.cutIn < c.winStart || c.cutOut > c.winEnd) {
       const span = Math.max(c.winEnd - c.winStart, c.cutOut - c.cutIn + 20)
@@ -112,9 +123,9 @@ export function updateClip(id: string, patch: ClipPatch): Clip {
       c.winEnd = Math.min(duration, c.winStart + span)
     }
     // legenda acompanha o novo corte sem perder o que já foi editado
-    if (c.cues && c.words && !patch.cues) c.cues = mergeCues(c.cues, c.words, c.cutIn, c.cutOut, getSettings().dictionary)
+    if (c.cues && c.words && !patch.cues) c.cues = mergeCuesInCuts(c.cues, c.words, c.segments, getSettings().dictionary)
   }
-  if (c.zoomAt !== null && (c.zoomAt < c.cutIn || c.zoomAt > c.cutOut)) c.zoomAt = null
+  if (c.zoomAt !== null && cutIndexAt(cutsOf(c), c.zoomAt) < 0) c.zoomAt = null
 
   const after = JSON.stringify(RENDER_FIELDS.map((k) => c[k as keyof Clip]))
   if (before !== after) markStale(c)
@@ -123,11 +134,12 @@ export function updateClip(id: string, patch: ClipPatch): Clip {
 
 export function rebuildCues(c: Clip): Clip['cues'] {
   if (!c.words) return null
-  return applyDictionary(buildCues(c.words, c.cutIn, c.cutOut), getSettings().dictionary)
+  return applyDictionary(buildCuesInCuts(c.words, cutsOf(c)), getSettings().dictionary)
 }
 
+/** "Clipe 07 · TEXTO DO GANCHO": nos avisos, na confirmação e na lista de agendados. */
 export function clipName(c: Clip): string {
-  return `Clipe ${String(c.number).padStart(2, '0')}`
+  return clipTitle(c, getSettings().text)
 }
 
 export function hookText(c: Clip): string | null {
@@ -136,9 +148,7 @@ export function hookText(c: Clip): string | null {
 
 /** Momento do zoom: o escolhido, ou o pico detectado se estiver dentro do corte. */
 export function zoomMoment(c: Clip): number | null {
-  if (!c.zoomEnabled) return null
-  const at = c.zoomAt ?? c.peakSec
-  return at >= c.cutIn && at <= c.cutOut ? at : (c.cutIn + c.cutOut) / 2
+  return zoomPoint(c)
 }
 
 export function nextClipNumber(projectId: string): number {

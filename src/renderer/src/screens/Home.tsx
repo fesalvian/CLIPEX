@@ -31,7 +31,7 @@ function StageList({ p }: { p: ProjectSummary }) {
   )
 }
 
-function ProjectCard({ p }: { p: ProjectSummary }) {
+function ProjectCard({ p, focused }: { p: ProjectSummary; focused: boolean }) {
   const openProject = useStore((s) => s.openProject)
   const toast = useStore((s) => s.toast)
   const [confirmDelete, setConfirmDelete] = useState(false)
@@ -51,7 +51,12 @@ function ProjectCard({ p }: { p: ProjectSummary }) {
     )
 
   return (
-    <div className="project-card">
+    <div
+      className={`project-card${focused ? ' focused' : ''}`}
+      ref={(el) => {
+        if (el && focused) el.scrollIntoView({ block: 'center' })
+      }}
+    >
       <div className="project-top">
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 }}>
           <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
@@ -96,7 +101,7 @@ function ProjectCard({ p }: { p: ProjectSummary }) {
           </button>
         </div>
       </div>
-      {(analyzing || p.status === 'error' || stageErrors) && <StageList p={p} />}
+      {(focused || analyzing || p.status === 'error' || stageErrors) && <StageList p={p} />}
       {p.status === 'error' && p.error && (
         <div className="callout error">
           <Icon name="alert" />
@@ -170,6 +175,7 @@ function TwitchModal({ onClose }: { onClose: () => void }) {
 
 export function Home() {
   const projects = useStore((s) => s.projects)
+  const focus = useStore((s) => (s.route.name === 'home' ? s.route.focus : undefined))
   const watcher = useStore((s) => s.watcher)
   const components = useStore((s) => s.components)
   const go = useStore((s) => s.go)
@@ -195,6 +201,10 @@ export function Home() {
         subtitle="cortes automáticos das lives"
         actions={
           <>
+            <button className="btn" onClick={() => go({ name: 'posts' })}>
+              <Icon name="clock" />
+              Agendados
+            </button>
             <button className="btn" onClick={() => go({ name: 'settings' })}>
               <Icon name="gear" />
               Configurações
@@ -279,7 +289,7 @@ export function Home() {
             </button>
           </div>
         ) : (
-          projects.map((p) => <ProjectCard key={p.id} p={p} />)
+          projects.map((p) => <ProjectCard key={p.id} p={p} focused={focus === p.id} />)
         )}
       </main>
       {twitchOpen && <TwitchModal onClose={() => setTwitchOpen(false)} />}

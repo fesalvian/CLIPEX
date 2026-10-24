@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { Clip } from '@shared/types'
+import { cutsOf } from '@shared/cuts'
+import type { Clip, Cut } from '@shared/types'
 import { mediaUrl } from '../api'
 
 export interface Player {
@@ -28,7 +29,21 @@ function previewCovers(c: Clip): boolean {
 }
 
 /**
- * Toca o corte em loop entre o início e o fim. Usa o trecho leve do corte quando ele
+ * Pra onde o vídeo tem que pular: antes de um trecho (começo ou buraco entre trechos) vai pro
+ * início dele; passou do fim do último volta pro começo; null = está tocando dentro de um trecho.
+ */
+function jumpTarget(cuts: Cut[], t: number): number | null {
+  for (let i = 0; i < cuts.length; i++) {
+    const k = cuts[i]!
+    // folga maior no começo: o seek do <video> pode cair um pouco antes
+    if (t < k.s - (i === 0 ? 0.5 : 0.1)) return k.s
+    if (t < k.e - 0.02) return null
+  }
+  return cuts[0]?.s ?? null
+}
+
+/**
+ * Toca o corte em loop entre o início e o fim, pulando o que fica entre os trechos. Usa o trecho leve do corte quando ele
  * cobre o corte; senão o proxy da live inteira (se já existir) enquanto o trecho é gerado.
  */
 export function usePreviewPlayer(clip: Clip | null, proxyPath: string | null): Player {
@@ -51,8 +66,9 @@ export function usePreviewPlayer(clip: Clip | null, proxyPath: string | null): P
   }
   const cutIn = clip?.cutIn ?? 0
   const cutOut = clip?.cutOut ?? 0
-  const bounds = useRef({ cutIn, cutOut, offset })
-  bounds.current = { cutIn, cutOut, offset }
+  const cuts = clip ? cutsOf(clip) : []
+  const bounds = useRef({ cutIn, cutOut, offset, cuts })
+  bounds.current = { cutIn, cutOut, offset, cuts }
 
   // corte novo: volta pro começo e para
   useEffect(() => {
@@ -84,7 +100,8 @@ export function usePreviewPlayer(clip: Clip | null, proxyPath: string | null): P
       if (v) {
         const b = bounds.current
         const t = b.offset + v.currentTime
-        if (t >= b.cutOut - 0.02 || t < b.cutIn - 0.5) v.currentTime = Math.max(0, b.cutIn - b.offset)
+        const to = jumpTarget(b.cuts, t)
+        if (to !== null) v.currentTime = Math.max(0, to - b.offset)
         setTime(b.offset + v.currentTime)
       }
       raf = requestAnimationFrame(loop)
@@ -98,7 +115,8 @@ export function usePreviewPlayer(clip: Clip | null, proxyPath: string | null): P
     if (!v || !src) return
     const b = bounds.current
     const t = b.offset + v.currentTime
-    if (t < b.cutIn || t >= b.cutOut - 0.05) v.currentTime = Math.max(0, b.cutIn - b.offset)
+    const to = t >= b.cutOut - 0.05 ? b.cutIn : jumpTarget(b.cuts, t)
+    if (to !== null) v.currentTime = Math.max(0, to - b.offset)
     void v.play().then(
       () => setPlaying(true),
       () => setPlaying(false)

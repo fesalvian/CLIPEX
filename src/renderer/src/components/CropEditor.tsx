@@ -7,6 +7,8 @@ import { capturePointer } from '../lib/pointer'
 
 interface Props {
   project: Project
+  /** recorte mostrado (o do corte selecionado, ou o padrão do projeto) */
+  crop: CropLayout
   /** player do preview: o editor mostra o mesmo quadro (pausado ou tocando) */
   player: Player
   showCam: boolean
@@ -17,16 +19,16 @@ interface Props {
 type Kind = 'cam' | 'game'
 
 /** Frame 16:9 da live com os dois retângulos: laranja = webcam, ciano = jogo. */
-export function CropEditor({ project, player, showCam, showGame, onCommit }: Props) {
-  const [crop, setCrop] = useState<CropLayout>(project.crop)
+export function CropEditor({ project, crop: shown, player, showCam, showGame, onCommit }: Props) {
+  const [crop, setCrop] = useState<CropLayout>(shown)
   const ref = useRef<HTMLDivElement | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const [hasFrame, setHasFrame] = useState(false)
   const drag = useRef<{ kind: Kind; mode: 'move' | 'resize'; sx: number; sy: number; o: Rect; last: CropLayout } | null>(null)
 
   useEffect(() => {
-    if (!drag.current) setCrop(project.crop)
-  }, [project.crop])
+    if (!drag.current) setCrop(shown)
+  }, [shown])
 
   // Quadro inteiro do vídeo que está no preview, no mesmo instante (antes ficava uma foto
   // tirada de outro ponto da live, que não batia com o preview).

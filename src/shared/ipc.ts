@@ -2,6 +2,7 @@ import type { PlatformRules } from './platformRules'
 import type {
   Captions,
   Clip,
+  ClipRender,
   ComponentKey,
   ComponentStatus,
   CropLayout,
@@ -26,11 +27,13 @@ export type ClipPatch = Partial<
     Clip,
     | 'cutIn'
     | 'cutOut'
+    | 'segments'
     | 'winStart'
     | 'winEnd'
     | 'approved'
     | 'layout'
     | 'camSplit'
+    | 'crop'
     | 'hookChoice'
     | 'hookCustom'
     | 'hookOff'
@@ -44,16 +47,51 @@ export type ClipPatch = Partial<
   >
 >
 
+/** Um post na tela de agendados, com o nome do corte e da live. */
+export interface PostOverviewItem {
+  post: Post
+  clipName: string
+  projectName: string
+  render: Pick<ClipRender, 'status' | 'error'> | null
+}
+
 export interface ScheduleRequest {
   clipIds: string[]
   networks: Network[]
   /** null = começar agora (o primeiro corte sai na hora) */
   firstAt: string | null
+  /** com firstAt null: quantos cortes saem na hora (padrão 1); o resto segue o ritmo */
+  nowCount?: number
   /**
    * null = todos no mesmo horário; 1 = um por dia (no horário de firstAt, ou no melhor
    * horário de cada rede se for "agora"); n = n por dia nos melhores horários de cada rede
    */
   perDay: number | null
+}
+
+/** Uma mudança de "organizar a fila": post repetido cancelado ou post em outro horário. */
+export interface TidyChange {
+  postId: string
+  clipName: string
+  projectName: string
+  network: Network
+  kind: 'cancel' | 'move'
+  from: string | null
+  to: string | null
+  /** já está no YouTube (agendado lá): muda pelo YouTube */
+  remote: boolean
+}
+
+export interface TidyPreview {
+  perDay: number
+  changes: TidyChange[]
+  /** tem Short agendado no YouTube pra mudar e a conexão não tem permissão de editar */
+  youtubeNeedsReconnect: boolean
+}
+
+export interface TidyResult {
+  applied: number
+  errors: string[]
 }
 
 export interface SchedulePreviewItem {
@@ -120,6 +158,11 @@ export interface IpcApi {
   'posts:schedule': (req: ScheduleRequest) => Post[]
   'posts:list': (projectId: string | null) => Post[]
   'posts:cancel': (postId: string) => Post
+  'posts:retry': (postId: string) => Post
+  'posts:overview': () => PostOverviewItem[]
+  /** organizar a fila: tira repetidos e espalha (no máximo n por dia em cada rede) */
+  'posts:tidy-preview': (perDay: number) => TidyPreview
+  'posts:tidy-apply': (perDay: number) => TidyResult
   'posts:suggest-time': () => ScheduleSuggestion[]
   /** melhores horários de cada rede pra n cortes por dia */
   'posts:slots': (perDay: number) => Record<Network, string[]>

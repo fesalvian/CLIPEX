@@ -81,6 +81,7 @@ export function defaultSettings(videosDir: string, logoPath: string | null = nul
       { term: 'clutch', variants: ['clatch', 'cluch', 'clóti'] }
     ],
     deleteRawAfterDays: null,
+    startWithWindows: true,
     musicMode: 'mute',
     encoder: 'auto',
     windowSec: 45,

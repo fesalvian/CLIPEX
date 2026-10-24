@@ -1,0 +1,37 @@
+# Instalador do Windows: npm run dist → dist/Clipador Setup x.y.z.exe
+# Whisper e modelos (2 GB) não vão no instalador: o app procura em %APPDATA%\Clipador\components
+# (baixados em Configurações › Componentes de IA, ou ligados do vendor/ com scripts/link-components.ps1).
+appId: br.fesalvian.clipador
+productName: Clipador
+directories:
+  output: dist
+  buildResources: build
+files:
+  - out/**
+  - package.json
+  # binários de outros sistemas não servem no Windows
+  - '!node_modules/ffprobe-static/bin/{darwin,linux}/**'
+  - '!node_modules/ffprobe-static/bin/win32/ia32/**'
+  - '!node_modules/onnxruntime-node/bin/napi-v*/{darwin,linux}/**'
+  - '!node_modules/onnxruntime-node/bin/napi-v*/win32/arm64/**'
+  # fontes da interface já vão embutidas no renderer
+  - '!node_modules/@fontsource/**'
+asarUnpack:
+  - node_modules/ffmpeg-static/**
+  - node_modules/ffprobe-static/**
+  - node_modules/onnxruntime-node/**
+extraResources:
+  - from: resources
+    to: resources
+  - from: config
+    to: config
+npmRebuild: false
+win:
+  target: nsis
+  icon: build/icon.png
+nsis:
+  oneClick: true
+  perMachine: false
+  runAfterFinish: true
+  createDesktopShortcut: true
+  shortcutName: Clipador

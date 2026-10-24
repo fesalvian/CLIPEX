@@ -1,12 +1,14 @@
 import { create } from 'zustand'
 import type { ClipPatch } from '@shared/ipc'
+import { clipSubtitle, clipTitle, DEFAULT_TEXT } from '@shared/text'
 import type { Clip, ComponentStatus, FontInfo, Post, Project, ProjectSummary, Settings, WatcherStatus } from '@shared/types'
 import { call, errorText } from './api'
 import { loadFontFaces } from './lib/fonts'
 
 export type Route =
-  | { name: 'home' }
+  | { name: 'home'; focus?: string }
   | { name: 'settings' }
+  | { name: 'posts' }
   | { name: 'clipar'; projectId: string }
   | { name: 'revisar'; projectId: string }
 
@@ -175,6 +177,16 @@ export function clipList(clips: Record<string, Clip>): Clip[] {
 
 export function clipLabel(c: Clip): string {
   return `Clipe ${String(c.number).padStart(2, '0')}`
+}
+
+/** Texto do gancho do vídeo (ou o título da IA), pra reconhecer o corte além do número. */
+export function clipSub(c: Clip): string | null {
+  return clipSubtitle(c, useStore.getState().settings?.text ?? DEFAULT_TEXT)
+}
+
+/** "Clipe 07 · TEXTO DO GANCHO" */
+export function clipFullName(c: Clip): string {
+  return clipTitle(c, useStore.getState().settings?.text ?? DEFAULT_TEXT)
 }
 
 /** Nota mostrada na lista: a da IA quando existe, senão a força do sinal. */

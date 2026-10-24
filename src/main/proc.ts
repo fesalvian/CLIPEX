@@ -43,6 +43,11 @@ function lineSplitter(cb: ((line: string) => void) | undefined): (chunk: Buffer)
 
 const active = new Set<ChildProcess>()
 
+/** ffmpeg, Whisper etc. rodando agora. */
+export function activeProcessCount(): number {
+  return active.size
+}
+
 /** No Windows os filhos sobrevivem ao app: mata tudo que ainda roda ao sair. */
 export function killAllProcesses(): void {
   for (const c of active) {

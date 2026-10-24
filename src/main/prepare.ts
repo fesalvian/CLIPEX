@@ -1,9 +1,10 @@
 // "Renderizar N clipes" na tela de clipar: deixa cada corte aprovado pronto pra revisar
 // (transcrição, legenda em trechos, legenda/hashtags por rede) e já manda renderizar.
 
+import { cutsDuration, cutsOf, wordsOnOutput } from '@shared/cuts'
 import { enforceCaption } from '@shared/platformRules'
 import { applyDictionary } from '@shared/subtitles'
-import { NETWORKS, type Captions, type Clip, type LlmProvider } from '@shared/types'
+import { NETWORKS, type Captions, type Clip, type LlmProvider, type Word } from '@shared/types'
 import { toast } from './bus'
 import { clipName, hookText, mutateClip, rebuildCues } from './clips'
 import { existsSync } from 'node:fs'
@@ -28,6 +29,12 @@ function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
 }
 
+/** O que a IA lê: só as falas dos trechos, coladas como no vídeo final. */
+function spokenWords(c: Clip): { words: Word[]; duration: number } {
+  const cuts = cutsOf(c)
+  return { words: wordsOnOutput(c.words ?? [], cuts), duration: cutsDuration(cuts) }
+}
+
 export async function generateCaptions(clipId: string, provider?: LlmProvider): Promise<Captions> {
   const c = clipsRepo.get(clipId)
   if (!c) throw new Error('Corte não encontrado')
@@ -36,10 +43,11 @@ export async function generateCaptions(clipId: string, provider?: LlmProvider): 
   const out = await llmLane.run(async () => {
     const client = await llmClient(provider)
     const game = projectsRepo.get(c.projectId)?.game ?? null
+    const spoken = spokenWords(c)
     const { system, user } = captionsPrompt(
-      c.words!,
-      c.cutIn,
-      c.cutOut,
+      spoken.words,
+      0,
+      spoken.duration,
       hookText(c),
       c.llm?.title ?? null,
       rules,
@@ -63,7 +71,8 @@ export async function generateHooks(clipId: string, provider?: LlmProvider): Pro
   const avoid = c.llm?.hooks ?? []
   const out = await llmLane.run(async () => {
     const client = await llmClient(provider)
-    const { system, user } = hooksPrompt(c.words!, c.cutIn, c.cutOut, avoid, hookStyleBlock(projectsRepo.get(c.projectId)?.game ?? null))
+    const spoken = spokenWords(c)
+    const { system, user } = hooksPrompt(spoken.words, 0, spoken.duration, avoid, hookStyleBlock(projectsRepo.get(c.projectId)?.game ?? null))
     return { r: await client.chatJson<{ hooks: string[] }>(system, user, HOOKS_SCHEMA), provider: client.provider }
   })
   const hooks = out.r.hooks.map((h) => stripEmoji(h).toLocaleUpperCase('pt-BR')).filter(Boolean).slice(0, 3)

@@ -7,7 +7,9 @@ import { env } from '../env'
 import { loopbackAuth, pkce, postForm } from './oauth'
 import type { NetworkClient, PublishInput, PublishResult, RemoteStats } from './types'
 
-const SCOPES = ['https://www.googleapis.com/auth/youtube.upload', 'https://www.googleapis.com/auth/youtube.readonly']
+// force-ssl: mudar o horário ou apagar um Short já agendado (organizar a fila)
+const EDIT_SCOPE = 'https://www.googleapis.com/auth/youtube.force-ssl'
+const SCOPES = ['https://www.googleapis.com/auth/youtube.upload', 'https://www.googleapis.com/auth/youtube.readonly', EDIT_SCOPE]
 const KEY = 'youtube'
 
 interface Tokens {
@@ -15,6 +17,8 @@ interface Tokens {
   refresh_token: string
   expires_at: number
   channel: string | null
+  /** permissões dadas na conexão (conexões antigas não guardavam) */
+  scope?: string
 }
 
 function creds(): { id: string; secret: string } {
@@ -56,6 +60,28 @@ export function youtubeDescription(text: string, hashtags: string[]): string {
   return [text.trim(), hashtags.join(' ')].filter(Boolean).join('\n\n')
 }
 
+/** A conexão permite mudar o horário e apagar Shorts já agendados (conexões antigas não). */
+export function youtubeCanEdit(): boolean {
+  return !!secretsRepo.get<Tokens>(KEY)?.scope?.includes(EDIT_SCOPE)
+}
+
+/** Muda a hora de publicar de um Short já agendado no YouTube. */
+export async function youtubeReschedule(videoId: string, publishAt: Date): Promise<void> {
+  await api('videos?part=status', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json; charset=UTF-8' },
+    body: JSON.stringify({
+      id: videoId,
+      status: { privacyStatus: 'private', publishAt: publishAt.toISOString(), selfDeclaredMadeForKids: false }
+    })
+  })
+}
+
+/** Apaga um Short (privado, agendado) do canal. */
+export async function youtubeDelete(videoId: string): Promise<void> {
+  await api(`videos?id=${encodeURIComponent(videoId)}`, { method: 'DELETE' })
+}
+
 export const youtube: NetworkClient = {
   network: 'youtube',
 
@@ -93,7 +119,8 @@ export const youtube: NetworkClient = {
       access_token: String(r.access_token),
       refresh_token: String(r.refresh_token ?? ''),
       expires_at: Date.now() + Number(r.expires_in ?? 3600) * 1000,
-      channel: null
+      channel: null,
+      scope: String(r.scope ?? '')
     } satisfies Tokens)
     try {
       const ch = await api<{ items?: { snippet?: { customUrl?: string; title?: string } }[] }>('channels?part=snippet&mine=true')

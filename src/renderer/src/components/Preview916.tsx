@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, type PointerEvent as RPointerEvent } from 'react'
 import { OUT_W } from '@shared/defaults'
 import { coverCrop, layoutPanes, zoomCrop } from '@shared/geometry'
-import { applyDictionary, buildCues } from '@shared/subtitles'
+import { cutsDuration, cutsOf, toOut } from '@shared/cuts'
+import { applyDictionary, buildCuesInCuts } from '@shared/subtitles'
 import { fmtDur } from '@shared/time'
 import type { CaptionStyle, Clip, CropLayout, DictEntry, HookStyle, SubtitleCue, Watermark } from '@shared/types'
 import { mediaUrl } from '../api'
@@ -112,15 +113,20 @@ export function Preview916(props: Props) {
   const cues = useMemo(() => {
     if (!clip) return []
     if (clip.cues) return clip.cues
-    return clip.words ? applyDictionary(buildCues(clip.words, clip.cutIn, clip.cutOut), dictionary) : []
+    return clip.words ? applyDictionary(buildCuesInCuts(clip.words, cutsOf(clip)), dictionary) : []
   }, [clip, dictionary])
   const cue = cues.find((c) => t >= c.start && t < c.end) ?? null
   const sampleCue = cues[0] ?? SAMPLE_CUE
   const editing = !!onTextChange && !player.playing
 
-  const dur = clip ? clip.cutOut - clip.cutIn : 0
-  const pos = clip ? Math.max(0, Math.min(1, (t - clip.cutIn) / Math.max(0.1, dur))) : 0
-  const zoomMark = clip && zoomAt != null ? (zoomAt - clip.cutIn) / Math.max(0.1, dur) : null
+  // tempo no vídeo final: os trechos colados, sem o que fica entre eles
+  const cuts = clip ? cutsOf(clip) : []
+  const dur = cutsDuration(cuts)
+  const elapsed = clip ? toOut(cuts, t) : 0
+  const pos = clip ? Math.max(0, Math.min(1, elapsed / Math.max(0.1, dur))) : 0
+  const zoomMark = clip && zoomAt != null ? toOut(cuts, zoomAt) / Math.max(0.1, dur) : null
+  // onde um trecho emenda no outro (marcas na barra)
+  const joins = cuts.slice(1).map((k) => toOut(cuts, k.s) / Math.max(0.1, dur))
 
   // ---- marca d'água/logo arrastável ----
   // no modo "acima da legenda": arrastar muda o espaço até a legenda e o deslocamento lateral
@@ -194,7 +200,7 @@ export function Preview916(props: Props) {
         cue={cue}
         sampleCue={sampleCue}
         t={t}
-        clipStart={clip?.cutIn ?? 0}
+        elapsed={elapsed}
         editing={editing}
         onChange={onTextChange}
       />
@@ -232,10 +238,13 @@ export function Preview916(props: Props) {
       <div className="p916-bar">
         <div className="progress">
           <span style={{ width: `${pos * 100}%` }} />
+          {joins.map((j, i) => (
+            <i key={i} className="join-mark" style={{ left: `${j * 100}%` }} />
+          ))}
           {zoomMark !== null && zoomMark >= 0 && zoomMark <= 1 && <i className="zoom-mark" style={{ left: `${zoomMark * 100}%` }} />}
         </div>
         <div className="p916-times mono">
-          <span>{fmtDur(Math.max(0, t - (clip?.cutIn ?? 0)))}</span>
+          <span>{fmtDur(elapsed)}</span>
           <span>{fmtDur(dur)}</span>
         </div>
       </div>

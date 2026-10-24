@@ -28,7 +28,8 @@ interface Props {
   sampleCue: SubtitleCue | null
   /** instante atual na live (s) */
   t: number
-  clipStart: number
+  /** instante no vídeo final (s): o gancho conta a partir do começo do vídeo */
+  elapsed: number
   /** pausado e editável: mostra os dois textos com contorno pra arrastar e redimensionar */
   editing: boolean
   onChange?: (kind: TextKind, patch: TextPatch, final: boolean) => void
@@ -58,7 +59,7 @@ function Handles({ on }: { on: (mode: Mode) => (e: RPointerEvent) => void }) {
 }
 
 /** Legenda e gancho por cima do preview, com o mesmo estilo e animação do render. */
-export function TextLayer({ width, caption, hook, hookText, cue, sampleCue, t, clipStart, editing, onChange }: Props) {
+export function TextLayer({ width, caption, hook, hookText, cue, sampleCue, t, elapsed, editing, onChange }: Props) {
   const s = width / OUT_W
   const drag = useRef<{ kind: TextKind; mode: Mode; sx: number; sy: number; x: number; y: number; bw: number; size: number; last: TextPatch } | null>(
     null
@@ -150,7 +151,7 @@ export function TextLayer({ width, caption, hook, hookText, cue, sampleCue, t, c
   let hookEl: React.ReactNode = null
   if (hook.enabled && hookText) {
     const text = displayText(stripEmoji(hookText), hook.uppercase)
-    const f = editing ? STATIC_HOOK : hookFrame(text, t - clipStart, hook)
+    const f = editing ? STATIC_HOOK : hookFrame(text, elapsed, hook)
     if (f.visible) {
       const pad = hook.box ? 22 * s : 0
       hookEl = (

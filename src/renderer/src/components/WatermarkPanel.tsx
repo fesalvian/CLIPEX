@@ -4,20 +4,31 @@ import type { CaptionStyle, Watermark } from '@shared/types'
 import { call, errorText, mediaUrl } from '../api'
 import { useStore } from '../store'
 import { Icon } from './Icon'
+import { OwnSettingRow } from './OwnSettingRow'
 
 interface Props {
   watermark: Watermark
   /** legenda do corte selecionado (a logo fica acima dela) */
   caption: CaptionStyle & { y: number }
-  /** cortes com marca d'água própria (antiga): o botão volta todos pro padrão */
+  /** as mudanças valem só pro corte selecionado */
+  perClip: boolean
+  /** o corte selecionado tem uma logo própria */
+  own: boolean
+  /** cortes com logo própria */
   overrides: number
+  /** "mudar em todos os cortes" marcado */
+  allMode: boolean
+  onAllModeChange: (on: boolean) => void
   onChange: (wm: Watermark) => void
+  /** volta o corte selecionado pra logo padrão */
+  onReset: () => void
+  /** a logo mostrada vira o padrão e vale pra todos os cortes */
   onApplyAll: () => void
 }
 
 const OPACITIES = [0.5, 0.8, 1]
 
-export function WatermarkPanel({ watermark: wm, caption, overrides, onChange, onApplyAll }: Props) {
+export function WatermarkPanel({ watermark: wm, caption, perClip, own, overrides, allMode, onAllModeChange, onChange, onReset, onApplyAll }: Props) {
   const toast = useStore((s) => s.toast)
   const ratio = wm.imgH / Math.max(1, wm.imgW)
   const fileName = wm.path ? (wm.path.split(/[\\/]/).pop() ?? '') : null
@@ -27,7 +38,7 @@ export function WatermarkPanel({ watermark: wm, caption, overrides, onChange, on
   const pick = async (): Promise<void> => {
     try {
       const next = await call('watermark:pick')
-      if (next) onChange(next)
+      if (next) onChange({ ...wm, enabled: true, path: next.path, imgW: next.imgW, imgH: next.imgH, w: next.w })
     } catch (e) {
       toast('error', errorText(e))
     }
@@ -79,7 +90,7 @@ export function WatermarkPanel({ watermark: wm, caption, overrides, onChange, on
         <Icon name="move" color="#C4B5FD" />
         <span>
           {anchored
-            ? 'A logo acompanha a legenda em todos os cortes: fica sempre logo acima dela, sem encostar. Arraste no preview pra mudar o espaço e o lado; o canto roxo muda o tamanho.'
+            ? 'A logo acompanha a legenda: fica sempre logo acima dela, sem encostar. Arraste no preview pra mudar o espaço e o lado; o canto roxo muda o tamanho.'
             : 'Arraste a imagem no preview pra mover. Puxe o canto roxo pra redimensionar, mantendo a proporção do PNG.'}
         </span>
       </div>
@@ -140,12 +151,19 @@ export function WatermarkPanel({ watermark: wm, caption, overrides, onChange, on
         </button>
       </div>
 
-      {overrides > 0 && (
+      {own && !allMode && <OwnSettingRow text="Este corte tem uma logo própria." onReset={onReset} onApplyAll={onApplyAll} />}
+      {!own && overrides > 0 && (
         <button className="btn soft" onClick={onApplyAll}>
           Usar esta logo nos {overrides} {overrides === 1 ? 'corte que tem' : 'cortes que têm'} outra
         </button>
       )}
-      <span className="hint">Vale pra todos os cortes (e pras próximas lives).</span>
+      <label className="check">
+        <input type="checkbox" checked={allMode} onChange={() => onAllModeChange(!allMode)} />
+        Mudar a logo em todos os cortes
+      </label>
+      <span className="hint">
+        {perClip ? 'Muda só neste corte.' : 'Muda em todos os cortes (e nas próximas lives).'}
+      </span>
     </div>
   )
 }

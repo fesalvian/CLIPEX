@@ -17,7 +17,8 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 
 export function applyDevUserData(): void {
   const dir = process.env.CLIPADOR_USERDATA
-  if (isDev && dir) {
+  // também no app instalado: medir consumo e testar sem tocar nos dados reais
+  if (dir) {
     mkdirSync(dir, { recursive: true })
     app.setPath('userData', dir)
   }
@@ -85,6 +86,17 @@ export async function runDevTour(win: BrowserWindow): Promise<void> {
       await js(`document.querySelector('.screen')?.scrollTo(0, 820)`)
       await sleep(800)
       await shot('q4-configuracoes-estilo')
+      await store(`s.go({ name: 'posts' })`)
+      await sleep(2000)
+      await shot('q5-agendados')
+      await js(`[...document.querySelectorAll('[role=tab]')].find((b) => b.textContent.startsWith('Todos'))?.click()`)
+      await sleep(800)
+      await shot('q6-agendados-todos')
+      if (p) {
+        await store(`s.go({ name: 'home', focus: ${JSON.stringify(p.id)} })`)
+        await sleep(1500)
+        await shot('q7-inicio-analise')
+      }
       return
     }
 

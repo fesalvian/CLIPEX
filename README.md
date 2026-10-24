@@ -21,6 +21,20 @@ O ffmpeg vem junto (`ffmpeg-static`); se faltar algo nele, o app usa o do sistem
 
 > Rodando de dentro de uma extensão do VS Code, a variável `ELECTRON_RUN_AS_NODE=1` pode vir herdada e o Electron abre como Node puro. No terminal normal isso não acontece; se acontecer, `Remove-Item Env:ELECTRON_RUN_AS_NODE` antes do `npm run dev`.
 
+## Instalar no Windows
+
+```powershell
+npm run dist                                                        # gera dist\Clipador Setup x.y.z.exe
+powershell -ExecutionPolicy Bypass -File scripts\link-components.ps1  # Whisper/modelos do vendor\ + .env
+& "dist\Clipador Setup 0.1.0.exe"
+```
+
+- O app instalado usa a mesma pasta de dados do dev (`%APPDATA%\Clipador`: banco, contas conectadas, componentes), mas lê o `.env` de **`%APPDATA%\Clipador\.env`**, não o do projeto. Mudou uma chave? Edite esse arquivo e reinicie o app pela bandeja.
+- O instalador não leva o Whisper nem os modelos (2 GB): o script acima cria hard links do `vendor\` em `%APPDATA%\Clipador\components` (sem ocupar espaço de novo). Sem o `vendor\`, baixe em Configurações › Componentes de IA.
+- **Abre com o Windows** direto na bandeja (Configurações › "Abrir com o Windows"), em modo econômico: só o processo principal, sem aceleração de vídeo, ~80 MB de RAM e CPU parada em ~0%. Ele só confere a fila de posts a cada 30 s e a pasta vigiada a cada 4 s.
+- Abrir a janela pela bandeja reinicia o app no modo normal (1 a 2 s). Fechar a janela, quando nada estiver rodando (render, análise ou envio), volta pro modo econômico. **Sair** na bandeja encerra tudo, inclusive ffmpeg e Whisper.
+- Ícone: `node_modules\.bin\electron scripts\make-icon.cjs` gera `build\icon.png` e `resources\icon.png`.
+
 ## Como usar
 
 1. **Grave no OBS** em MKV com as faixas separadas: 1 mix, 2 microfone, 3 jogo, 4 Discord, 5 música ([guia de configuração](https://claude.ai/code/artifact/9bffb54e-39c4-4bbd-ae1d-0e61aefda0b2)). Nome do arquivo: `live_AAAA-MM-DD_hh-mm.mkv`.
@@ -38,7 +52,9 @@ No preview pausado, a legenda, o texto inicial e a logo têm alças: as laterais
 **Textos padronizados** (Configurações): fonte, tamanho, cores, contorno, caixa, maiúsculas, animação e posição padrão da legenda e do texto inicial. O texto inicial pode ser a sugestão da IA ou um texto fixo, e os dois podem ser desligados. Dá pra importar fontes `.ttf`/`.otf`; já vêm Montserrat ExtraBold, Anton, Bebas Neue, Bangers, Luckiest Guy e Poppins Black (licenças em `resources/fonts`).
 6. **Plano B:** "Baixar este clipe" e "Baixar todos (.zip)", cada vídeo com um `.txt` das legendas de cada rede.
 
-Fechar a janela deixa o app na bandeja, pros agendamentos de Instagram e TikTok continuarem valendo.
+Fechar a janela deixa o app na bandeja, pros agendamentos de Instagram e TikTok continuarem valendo. O YouTube não depende disso: o vídeo sobe na hora de agendar e o próprio YouTube publica.
+
+Se o Clipador estava fechado na hora de algum post do Instagram ou do TikTok, ao abrir ele não manda tudo de uma vez: o primeiro atrasado sai na hora e os outros andam pros próximos horários da fila, no mesmo ritmo. Rede desconectada não falha post por post: a fila espera e continua quando a conta for conectada. Post que falhou mostra o erro na revisão, com **Tentar de novo**.
 
 ## Segredos e contas (`.env`)
 
@@ -100,7 +116,7 @@ Ligar a Página: pelo Facebook (agindo como a Página: Settings & privacy › Se
 7. Em **Credentials** do Sandbox, copie **Client key** e **Client secret** pra `TIKTOK_CLIENT_KEY` e `TIKTOK_CLIENT_SECRET`. A chave do Sandbox começa com `sbaw`; a de produção (`aw…`) só funciona depois do review.
 8. Feche o Clipador pela bandeja (Sair), abra de novo e vá em Configurações › Contas › TikTok › **Conectar**.
 
-O vídeo chega como **rascunho** na caixa de entrada do app do TikTok: você abre, ajusta a legenda e publica.
+O vídeo chega como **rascunho** na caixa de entrada do app do TikTok: você abre, ajusta a legenda e publica. O TikTok aceita no máximo **5 rascunhos pendentes por 24 horas** por conta (`spam_risk_too_many_pending_share`); publique os rascunhos pelo app e não agende mais de 4 por dia.
 
 ### Site (termos e privacidade)
 

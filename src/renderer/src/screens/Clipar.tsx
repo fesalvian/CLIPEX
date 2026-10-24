@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { STAGE_LABEL, STAGE_ORDER } from '@shared/defaults'
+import { clipDuration, cutsOf, newSegmentAt, withCuts } from '@shared/cuts'
 import { fmtClock, fmtDur, fmtLong, fmtTotal } from '@shared/time'
 import type { CamSplit, Clip, ClipLayout, CropLayout, DetectedTag, Project, Watermark } from '@shared/types'
 import { call, errorText } from '../api'
@@ -7,13 +8,15 @@ import { AppHeader } from '../components/AppHeader'
 import { CropEditor } from '../components/CropEditor'
 import { Icon, PauseIcon, PlayIcon } from '../components/Icon'
 import { ManualClipModal } from '../components/ManualClipModal'
+import { OwnSettingRow } from '../components/OwnSettingRow'
 import { Preview916 } from '../components/Preview916'
+import { RawGoneNotice } from '../components/RawGoneNotice'
 import { WatermarkPanel } from '../components/WatermarkPanel'
 import { TextsPanel } from '../components/TextsPanel'
 import type { TextKind, TextPatch } from '../components/TextLayer'
 import { Waveform } from '../components/Waveform'
 import { usePreviewPlayer, type Player } from '../lib/player'
-import { clipLabel, clipList, clipScore, useStore, type LiveWave } from '../store'
+import { clipLabel, clipList, clipScore, clipSub, useStore, type LiveWave } from '../store'
 import { captionStyleFor, hookStyleFor, hookTextFor } from '@shared/text'
 
 type Filter = 'all' | 'laugh' | 'scream' | 'peak' | 'manual'
@@ -39,6 +42,9 @@ const LAYOUTS: { key: ClipLayout; label: string }[] = [
   { key: 'cam', label: 'Só cam' }
 ]
 const SPLITS: CamSplit[] = [30, 40, 50]
+/** tamanho da timeline de cada corte (s): dá pra afastar pra pegar outros trechos do momento */
+const TIMELINE_MIN = 20
+const TIMELINE_MAX = 30 * 60
 
 export function projectSubtitle(p: Project | null): string {
   if (!p) return ''
@@ -98,6 +104,29 @@ function ClipRow({
 }) {
   const previewClip = useStore((s) => s.previewClip)
   const patchClip = useStore((s) => s.patchClip)
+  const toast = useStore((s) => s.toast)
+  const cuts = cutsOf(clip)
+  const span = clip.winEnd - clip.winStart
+
+  /** Trecho novo no cursor (se estiver fora dos trechos) ou depois do último; a timeline estica. */
+  const addSegment = (): void => {
+    const k = newSegmentAt(cuts, selected ? player.time : null, duration)
+    if (!k) {
+      toast('info', 'Não tem espaço pra outro trecho depois do último. Ande a timeline ou ponha o cursor fora dos trechos.')
+      return
+    }
+    if (!selected) onSelect()
+    void patchClip(clip.id, withCuts([...cuts, k].sort((a, b) => a.s - b.s)))
+    player.seek(k.s)
+  }
+
+  /** Aproxima ou afasta a timeline em volta do meio (mais da live pra pegar outros trechos). */
+  const zoomView = (factor: number): void => {
+    const next = Math.max(TIMELINE_MIN, Math.min(TIMELINE_MAX, Math.min(duration, span * factor)))
+    const mid = (clip.winStart + clip.winEnd) / 2
+    const winStart = Math.max(0, Math.min(duration - next, mid - next / 2))
+    void patchClip(clip.id, { winStart, winEnd: winStart + next })
+  }
 
   const isPlaying = selected && player.playing
   const busy = clip.stage === 'transcribing' || clip.stage === 'ranking' || (clip.stage === 'detected' && !clip.llm)
@@ -115,7 +144,7 @@ function ClipRow({
       <div className="clip-main">
         <div className="clip-top">
           <span className="clip-name">{clipLabel(clip)}</span>
-          {clip.llm?.title && <span className="clip-title">{clip.llm.title}</span>}
+          {clipSub(clip) && <span className="clip-title">{clipSub(clip)}</span>}
           {clip.tags.map((t) => (
             <span key={t} className="chip">
               <span className="dot" style={{ background: TAG_INFO[t].color }} />
@@ -149,10 +178,10 @@ function ClipRow({
           duration={duration}
           selected={selected}
           time={selected ? player.time : null}
-          onCutChange={(cutIn, cutOut, final) => {
+          onCutsChange={(next, final) => {
             if (!selected) onSelect()
-            if (final) void patchClip(clip.id, { cutIn, cutOut })
-            else previewClip(clip.id, { cutIn, cutOut })
+            if (final) void patchClip(clip.id, withCuts(next))
+            else previewClip(clip.id, withCuts(next))
           }}
           onViewChange={(winStart, winEnd, final) => {
             if (final) void patchClip(clip.id, { winStart, winEnd })
@@ -167,10 +196,32 @@ function ClipRow({
         <div className="clip-times mono">
           <span>{fmtClock(clip.winStart)}</span>
           <span style={{ color: 'var(--text-3)' }}>
-            corte: {fmtClock(clip.cutIn)} → {fmtClock(clip.cutOut)} ·{' '}
-            <span style={{ color: 'var(--violet-3)' }}>{fmtDur(clip.cutOut - clip.cutIn)}</span>
+            {cuts.length > 1 ? `${cuts.length} trechos` : `corte: ${fmtClock(clip.cutIn)} → ${fmtClock(clip.cutOut)}`} ·{' '}
+            <span style={{ color: 'var(--violet-3)' }}>{fmtDur(clipDuration(clip))}</span>
           </span>
           <span>{fmtClock(clip.winEnd)}</span>
+        </div>
+
+        <div className="clip-tools">
+          <button className="btn xs" onClick={addSegment} title="Junta outro pedaço da live neste mesmo vídeo (corte seco entre eles)">
+            <Icon name="plus" size={13} /> Trecho
+          </button>
+          <span style={{ flexGrow: 1 }} />
+          <span className="mono" style={{ fontSize: 11, color: 'var(--muted-2)' }}>
+            timeline {fmtDur(span)}
+          </span>
+          <button className="btn xs icon" onClick={() => zoomView(1 / 1.6)} disabled={span <= TIMELINE_MIN + 0.5} aria-label="Aproximar a timeline" title="Aproximar">
+            <Icon name="zoomIn" size={14} />
+          </button>
+          <button
+            className="btn xs icon"
+            onClick={() => zoomView(1.6)}
+            disabled={span >= Math.min(duration, TIMELINE_MAX) - 0.5}
+            aria-label="Afastar a timeline (mostrar mais da live)"
+            title="Afastar (mostrar mais da live)"
+          >
+            <Icon name="zoomOut" size={14} />
+          </button>
         </div>
       </div>
 
@@ -202,6 +253,9 @@ export function Clipar() {
   const [filter, setFilter] = useState<Filter>('all')
   const [selId, setSelId] = useState<string | null>(null)
   const [presetOn, setPresetOn] = useState(true)
+  // recorte e logo mudam só no corte selecionado, a não ser que marque "mudar em todos"
+  const [cropAll, setCropAll] = useState(false)
+  const [wmAll, setWmAll] = useState(false)
   const [manualOpen, setManualOpen] = useState(false)
   const [wmDraft, setWmDraft] = useState<Watermark | null>(null)
   const [textDraft, setTextDraft] = useState<{ clipId: string; patch: Partial<Clip> } | null>(null)
@@ -212,7 +266,7 @@ export function Clipar() {
   )
   const selected = (selId ? clipsMap[selId] : null) ?? visible[0] ?? null
   const approved = clips.filter((c) => c.approved)
-  const totalSec = approved.reduce((n, c) => n + (c.cutOut - c.cutIn), 0)
+  const totalSec = approved.reduce((n, c) => n + clipDuration(c), 0)
 
   const player = usePreviewPlayer(selected, project?.proxyPath ?? null)
   const duration = project?.source?.durationSec ?? 0
@@ -249,6 +303,7 @@ export function Clipar() {
   }
 
   const effectiveWm: Watermark = wmDraft ?? selected?.watermark ?? settings.watermark
+  const effectiveCrop: CropLayout = selected?.crop ?? project.crop
   // enquanto arrasta um texto, o preview usa a posição provisória
   const textClip = selected ? { ...selected, ...(textDraft?.clipId === selected.id ? textDraft.patch : {}) } : null
   const capStyle = captionStyleFor(textClip ?? { captionStyle: null, layout: 'both', camSplit: 40 }, settings.text)
@@ -273,12 +328,23 @@ export function Clipar() {
     }
   }
 
-  const commitCrop = async (crop: CropLayout): Promise<void> => {
+  /** Recorte padrão do projeto: vale pra todos os cortes (os próprios voltam pro padrão). */
+  const setCropAllClips = async (crop: CropLayout): Promise<void> => {
     try {
       setProject(await call('projects:set-crop', project.id, crop, presetOn))
     } catch (e) {
       toast('error', errorText(e))
     }
+  }
+
+  const commitCrop = (crop: CropLayout): void => {
+    if (cropAll || !selected) void setCropAllClips(crop)
+    else void patchClip(selected.id, { crop })
+  }
+
+  const applyCropAll = async (): Promise<void> => {
+    await setCropAllClips(effectiveCrop)
+    toast('success', 'Recorte aplicado em todos os cortes.')
   }
 
   const setWatermark = (wm: Watermark, final = true): void => {
@@ -287,10 +353,14 @@ export function Clipar() {
       return
     }
     setWmDraft(null)
-    // a logo é a mesma em todos os cortes: mexer nela muda o padrão (a não ser que este
-    // corte tenha uma marca d'água própria de antes)
-    if (selected?.watermark) void patchClip(selected.id, { watermark: wm })
-    else void updateSettings({ watermark: wm })
+    if (wmAll || !selected) void setWmAllClips(wm)
+    else void patchClip(selected.id, { watermark: wm })
+  }
+
+  /** Logo padrão (configurações): vale pra todos os cortes e pras próximas lives. */
+  const setWmAllClips = async (wm: Watermark): Promise<void> => {
+    await updateSettings({ watermark: wm })
+    await Promise.all(clips.filter((c) => c.watermark).map((c) => patchClip(c.id, { watermark: null })))
   }
 
   const applyWmAll = async (): Promise<void> => {
@@ -339,6 +409,7 @@ export function Clipar() {
       <main className="screen split">
         <section aria-label="Momentos encontrados" className="col-list">
           <AnalysisBanner project={project} />
+          <RawGoneNotice project={project} />
           {!analyzing && project.error && (
             <div className={`callout ${project.status === 'error' ? 'error' : 'warn'}`}>
               <Icon name="alert" />
@@ -427,7 +498,7 @@ export function Clipar() {
           <div style={{ alignSelf: 'center' }}>
             <Preview916
               clip={textClip}
-              crop={project.crop}
+              crop={effectiveCrop}
               player={player}
               width={300}
               captionStyle={capStyle}
@@ -485,12 +556,27 @@ export function Clipar() {
           <div className="panel" style={{ gap: 10 }}>
             <CropEditor
               project={project}
+              crop={effectiveCrop}
               player={player}
               showCam={selected?.layout !== 'game'}
               showGame={selected?.layout !== 'cam'}
-              onCommit={(crop) => void commitCrop(crop)}
+              onCommit={commitCrop}
             />
-            <span className="hint">Arraste os retângulos e as alças pra ajustar o que vai pra cada parte do 9:16.</span>
+            <span className="hint">
+              Arraste os retângulos e as alças pra ajustar o que vai pra cada parte do 9:16.{' '}
+              {cropAll || !selected ? 'Muda em todos os cortes desta live.' : 'Muda só neste corte.'}
+            </span>
+            {selected?.crop && (
+              <OwnSettingRow
+                text="Este corte tem um recorte próprio."
+                onReset={() => void patchClip(selected.id, { crop: null })}
+                onApplyAll={() => void applyCropAll()}
+              />
+            )}
+            <label className="check">
+              <input type="checkbox" checked={cropAll} onChange={() => setCropAll(!cropAll)} />
+              Mudar o recorte em todos os cortes
+            </label>
             <label className="check">
               <input
                 type="checkbox"
@@ -510,8 +596,13 @@ export function Clipar() {
           <WatermarkPanel
             watermark={effectiveWm}
             caption={capStyle}
+            perClip={!!selected && !wmAll}
+            own={!!selected?.watermark}
             overrides={clips.filter((c) => c.watermark).length}
+            allMode={wmAll}
+            onAllModeChange={setWmAll}
             onChange={(wm) => setWatermark(wm)}
+            onReset={() => selected && void patchClip(selected.id, { watermark: null })}
             onApplyAll={() => void applyWmAll()}
           />
         </aside>

@@ -3,7 +3,7 @@
 
 import { OUT_H, OUT_W } from '@shared/defaults'
 import { coverCrop, layoutPanes, zoomCrop, type PixelRect } from '@shared/geometry'
-import type { CamSplit, ClipLayout, CropLayout } from '@shared/types'
+import type { CamSplit, ClipLayout, CropLayout, Cut } from '@shared/types'
 
 export type VideoEncoder = 'nvenc' | 'amf' | 'x264'
 
@@ -200,6 +200,11 @@ export interface RenderConfig {
   srcFps: number
   cutIn: number
   cutOut: number
+  /**
+   * trechos do corte, relativos a cutIn (o tempo do arquivo lido); com mais de um, o que fica
+   * entre eles sai do vídeo (corte seco). Sem = o intervalo inteiro.
+   */
+  keep?: Cut[]
   layout: ClipLayout
   camSplit: CamSplit
   crop: CropLayout
@@ -214,6 +219,30 @@ export interface RenderConfig {
   out: string
 }
 
+/**
+ * select/aselect dos trechos (tempo do arquivo lido). O vídeo leva cada quadro pra posição
+ * dele no vídeo final (trecho k começa na soma dos anteriores); o áudio é recontado amostra a
+ * amostra, sem buraco.
+ */
+export function keepFilters(keep: Cut[]): { video: string; audio: string } {
+  const inside = keep.map((k) => `between(t,${num(k.s)},${num(k.e)})`).join('+')
+  let acc = 0
+  let pts = '0'
+  const terms = keep.map((k) => {
+    const t = { k, acc }
+    acc += k.e - k.s
+    return t
+  })
+  for (let i = terms.length - 1; i >= 0; i--) {
+    const { k, acc: a } = terms[i]!
+    pts = `if(lte(T,${num(k.e)}),T-${num(k.s)}+${num(a)},${pts})`
+  }
+  return {
+    video: `select='${inside}',setpts='(${pts})/TB'`,
+    audio: `aselect='${inside}',asetpts=N/SR/TB`
+  }
+}
+
 function cropFilter(c: PixelRect): string {
   return `crop=${c.w}:${c.h}:${c.x}:${c.y}`
 }
@@ -224,7 +253,14 @@ export function renderFilterGraph(c: RenderConfig): { graph: string; videoOut: s
   const parts: string[] = []
   const splits = panes.length + (zoomKind ? 1 : 0)
   const srcLabels = Array.from({ length: splits }, (_, i) => `v${i}`)
-  parts.push(splits > 1 ? `[0:v]split=${splits}${srcLabels.map((l) => `[${l}]`).join('')}` : `[0:v]null[v0]`)
+  // vários trechos: só os quadros e o áudio de dentro deles, com o tempo recontado sem os buracos
+  const keep = c.keep && c.keep.length > 1 ? keepFilters(c.keep) : null
+  let vSrc = '[0:v]'
+  if (keep) {
+    parts.push(`[0:v]${keep.video}[vk]`)
+    vSrc = '[vk]'
+  }
+  parts.push(splits > 1 ? `${vSrc}split=${splits}${srcLabels.map((l) => `[${l}]`).join('')}` : `${vSrc}null[v0]`)
 
   const paneLabels: string[] = []
   let next = 0
@@ -281,7 +317,8 @@ export function renderFilterGraph(c: RenderConfig): { graph: string; videoOut: s
     aIn.push('[mus]')
   }
   const head = aIn.length > 1 ? `${aIn.join('')}amix=inputs=${aIn.length}:duration=first:normalize=0` : `${aIn[0]}anull`
-  parts.push(`${head},alimiter=limit=0.95,loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[aout]`)
+  const aKeep = keep ? `,${keep.audio}` : ''
+  parts.push(`${head}${aKeep},alimiter=limit=0.95,loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[aout]`)
 
   return { graph: parts.join(';'), videoOut: '[vout]', audioOut: '[aout]' }
 }

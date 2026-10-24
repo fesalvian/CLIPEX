@@ -117,6 +117,14 @@ export function SettingsScreen() {
                 />
                 Vigiar a pasta
               </label>
+              <label className="check">
+                <input
+                  type="checkbox"
+                  checked={settings.startWithWindows}
+                  onChange={() => set({ startWithWindows: !settings.startWithWindows })}
+                />
+                Abrir com o Windows, direto na bandeja (pros agendamentos de Instagram e TikTok saírem na hora)
+              </label>
               <label className="field" style={{ maxWidth: 420 }}>
                 Apagar o arquivo bruto (só da pasta vigiada) depois que todos os cortes aprovados forem postados
                 <select

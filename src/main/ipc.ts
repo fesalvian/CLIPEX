@@ -16,7 +16,7 @@ import { ensureDir, isDev, userDataDir } from './paths'
 import { enqueueAnalysis, ensureCoverage, loudnessOf, makePreview, processClip, reanalyze, retryAnalysis } from './pipeline'
 import { importFonts, listFonts, removeFont } from './fonts'
 import { trimTransparent } from './image'
-import { cancelPost, clients, planSchedule, schedulePosts } from './posting/scheduler'
+import { applyTidy, cancelPost, clients, planSchedule, planTidy, postsOverview, retryPost, schedulePosts } from './posting/scheduler'
 import { applyDictionaryToClip, generateCaptions, generateHooks, prepareClips } from './prepare'
 import { createProject, deleteProject, listSummaries, saveProject } from './projects'
 import { cancelRender, enqueueRender, markProjectStale } from './render/queue'
@@ -24,6 +24,7 @@ import { getSettings, platformRules, resetWatchSince, updateSettings } from './s
 import { importTwitchVod, isTwitchVodUrl } from './twitch'
 import { startWatcher, watcherStatus } from './watcher'
 import { postsRepo } from './db'
+import { applyAutostart } from './autostart'
 import { emit, toast } from './bus'
 
 type Handler<K extends IpcChannel> = (...args: Parameters<IpcApi[K]>) => ReturnType<IpcApi[K]> | Promise<Awaited<ReturnType<IpcApi[K]>>>
@@ -49,7 +50,15 @@ export function registerIpc(): void {
 
   // ---------- projetos ----------
   handle('projects:list', () => listSummaries())
-  handle('projects:get', (id) => projectsRepo.get(id))
+  handle('projects:get', (id) => {
+    const p = projectsRepo.get(id)
+    // bruto sumiu (apagado à mão) ou voltou (HD externo religado): a tela avisa
+    if (p && !p.rawDeletedAt !== existsSync(p.sourcePath)) {
+      p.rawDeletedAt = p.rawDeletedAt ? null : new Date().toISOString()
+      return saveProject(p)
+    }
+    return p
+  })
   handle('projects:import', async (path) => {
     let file = path
     if (!file) {
@@ -77,8 +86,10 @@ export function registerIpc(): void {
   handle('projects:set-crop', (id, crop, saveAsPreset) => {
     const p = projectsRepo.get(id)
     if (!p) throw new Error('Projeto não encontrado')
+    // recorte padrão do projeto = vale pra todos os cortes: os recortes próprios voltam pro padrão
     p.crop = crop
     if (saveAsPreset) updateSettings({ cropPreset: crop })
+    for (const c of clipsRepo.byProject(id)) if (c.crop) updateClip(c.id, { crop: null })
     markProjectStale(id)
     return saveProject(p)
   })
@@ -147,6 +158,10 @@ export function registerIpc(): void {
   handle('posts:schedule', (req) => schedulePosts(req))
   handle('posts:list', (projectId) => postsRepo.all(projectId))
   handle('posts:cancel', (id) => cancelPost(id))
+  handle('posts:retry', (id) => retryPost(id))
+  handle('posts:overview', () => postsOverview())
+  handle('posts:tidy-preview', (perDay) => planTidy(Math.max(1, Math.min(6, perDay))).preview)
+  handle('posts:tidy-apply', (perDay) => applyTidy(Math.max(1, Math.min(6, perDay))))
   handle('posts:suggest-time', () => suggestTimes())
   handle('posts:slots', (perDay) => bestSlots(Math.max(1, Math.min(10, perDay))))
   handle('style:list', () => listExamples())
@@ -177,6 +192,7 @@ export function registerIpc(): void {
     const next = updateSettings(patch)
     if (patch.watchFolder !== undefined && patch.watchFolder !== before.watchFolder) resetWatchSince()
     if (patch.watchFolder !== undefined || patch.watchEnabled !== undefined) startWatcher()
+    if (patch.startWithWindows !== undefined) applyAutostart(patch.startWithWindows)
     if (patch.watermark || patch.text) {
       // padrão global mudou (marca d'água ou textos): renders prontos ficam velhos
       for (const p of projectsRepo.all()) markProjectStale(p.id)

@@ -1,5 +1,6 @@
 // Plano B: baixar o vídeo pronto (ou todos num .zip) com um .txt das legendas de cada rede.
 
+import { clipDuration } from '@shared/cuts'
 import { copyFileSync, createWriteStream, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { BrowserWindow, dialog } from 'electron'
@@ -18,7 +19,7 @@ export function captionsTxt(c: Clip): string {
   const rules = platformRules()
   const acc = getSettings().accounts
   const handle = { instagram: acc.instagram, tiktok: acc.tiktok, youtube: acc.youtube }
-  const lines = [`${clipName(c)}${c.llm?.title ? ` — ${c.llm.title}` : ''}`, `Duração: ${fmtDur(c.cutOut - c.cutIn)}`, '']
+  const lines = [`${clipName(c)}${c.llm?.title ? ` — ${c.llm.title}` : ''}`, `Duração: ${fmtDur(clipDuration(c))}`, '']
   for (const net of NETWORKS) {
     const cap = c.captions?.[net]
     lines.push(`=== ${rules[net].product} · ${handle[net]} ===`)

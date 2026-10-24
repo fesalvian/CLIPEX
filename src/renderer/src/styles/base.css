@@ -382,6 +382,17 @@ input[type='checkbox'] {
   flex-shrink: 0;
 }
 
+.own-setting {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(255, 196, 138, 0.08);
+  border: 1px solid rgba(255, 196, 138, 0.3);
+  font-size: 12px;
+  color: #ffc48a;
+}
 .callout {
   display: flex;
   align-items: flex-start;

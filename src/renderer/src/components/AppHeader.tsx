@@ -42,7 +42,7 @@ export function AppHeader({ title, subtitle, step, analyzing, projectId, actions
           {STEPS.map((s, i) => {
             const done = i < idx && !(s.key === 'analise' && analyzing)
             const current = i === idx
-            const canGo = projectId && !current && s.key !== 'analise'
+            const canGo = projectId && !current
             const content = (
               <>
                 {done && <Icon name="check" size={14} color="#A78BFA" strokeWidth={2.6} />}
@@ -54,7 +54,14 @@ export function AppHeader({ title, subtitle, step, analyzing, projectId, actions
               <span key={s.key} style={{ display: 'contents' }}>
                 {i > 0 && <span className="step-sep" />}
                 {canGo ? (
-                  <button className="step" onClick={() => void openProject(projectId, s.key as 'clipar' | 'revisar')}>
+                  <button
+                    className="step"
+                    onClick={() =>
+                      s.key === 'analise'
+                        ? go({ name: 'home', focus: projectId })
+                        : void openProject(projectId, s.key as 'clipar' | 'revisar')
+                    }
+                  >
                     {content}
                   </button>
                 ) : (

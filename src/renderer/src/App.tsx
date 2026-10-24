@@ -3,6 +3,7 @@ import { call, useApiEvent } from './api'
 import { Toasts } from './components/Toasts'
 import { Clipar } from './screens/Clipar'
 import { Home } from './screens/Home'
+import { Posts } from './screens/Posts'
 import { Revisar } from './screens/Revisar'
 import { SettingsScreen } from './screens/Settings'
 import { useStore } from './store'
@@ -37,6 +38,7 @@ export function App() {
     <div className="app">
       {route.name === 'home' && <Home />}
       {route.name === 'settings' && <SettingsScreen />}
+      {route.name === 'posts' && <Posts />}
       {route.name === 'clipar' && <Clipar />}
       {route.name === 'revisar' && <Revisar />}
       <Toasts />

@@ -11,7 +11,18 @@ const KEY = 'tiktok'
 /** Porta fixa: o TikTok exige a URI de retorno cadastrada no app (http://127.0.0.1:51789/callback/). */
 const PORT = 51789
 const CALLBACK = '/callback/'
-const CHUNK = 10 * 1024 * 1024
+const MB = 1024 * 1024
+const CHUNK = 10 * MB
+
+/**
+ * Pedaços do upload (Media Transfer Guide: pedaços de 5 a 64 MB, o último leva o resto).
+ * Até 64 MB vai inteiro: o TikTok recusou um vídeo de 19 MB mandado como "1 pedaço de 10 MB"
+ * com o resto embutido ("The chunk size is invalid"). Acima disso, pedaços de 10 MB.
+ */
+export function chunkPlan(size: number): { chunkSize: number; count: number } {
+  if (size <= 64 * MB) return { chunkSize: size, count: 1 }
+  return { chunkSize: CHUNK, count: Math.floor(size / CHUNK) }
+}
 
 interface Tokens {
   access_token: string
@@ -119,8 +130,7 @@ export const tiktok: NetworkClient = {
 
   async publish(input, onProgress): Promise<PublishResult> {
     const size = statSync(input.videoPath).size
-    const chunk = size < CHUNK ? size : CHUNK
-    const count = Math.max(1, Math.floor(size / chunk))
+    const { chunkSize: chunk, count } = chunkPlan(size)
     const init = await api<{ publish_id: string; upload_url: string }>('/v2/post/publish/inbox/video/init/', {
       source_info: { source: 'FILE_UPLOAD', video_size: size, chunk_size: chunk, total_chunk_count: count }
     })

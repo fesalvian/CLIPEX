@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
 import { channelLogo } from '@shared/defaults'
-import { planSlots, pickSlots, DEFAULT_SLOTS } from '@shared/schedule'
+import { planSlots, pickSlots, reflowQueue, DEFAULT_SLOTS } from '@shared/schedule'
 import { captionTop, DEFAULT_TEXT, hookTextFor, watermarkBox } from '@shared/text'
 import type { Clip, StyleExample } from '@shared/types'
 
 // main/style.ts e main/image.ts dependem do Electron/banco: troca por versões em memória
 const store = new Map<string, unknown>()
-vi.mock('electron', () => ({ app: { isPackaged: false, getAppPath: () => '', getPath: () => '' }, BrowserWindow: { getAllWindows: () => [] }, safeStorage: {} }))
+vi.mock('electron', () => ({ app: { isPackaged: false, getAppPath: () => '', getPath: () => '' }, BrowserWindow: { getAllWindows: () => [] }, safeStorage: {}, shell: {} }))
 vi.mock('../src/main/db', () => ({
   settingsRepo: { get: (k: string) => store.get(k) ?? null, set: (k: string, v: unknown) => store.set(k, v) }
 }))
@@ -35,6 +35,12 @@ describe('vários cortes por dia', () => {
       '10/21:30 10/20:00',
       '11/12:00 11/12:00'
     ])
+  })
+
+  it('postar 3 agora e agendar o resto, 2 por dia', () => {
+    const plan = planSlots({ count: 6, networks: ['tiktok'], start, firstNow: true, nowCount: 3, perDay: 2, fixedTime: null, slots })
+    // os 3 de agora já passam do ritmo de hoje: o resto começa amanhã
+    expect(plan.map((r) => fmt(r[0]!))).toEqual(['agora', 'agora', 'agora', '10/12:30', '10/19:00', '11/12:30'])
   })
 
   it('1 por dia no horário escolhido', () => {
@@ -143,5 +149,44 @@ describe('meu jeito de escrever', () => {
     const all = listExamples() as StyleExample[]
     expect(all.filter((e) => e.text === 'texto final editado')).toHaveLength(1)
     expect(all.some((e) => e.kind === 'hook' && e.text === 'MEU GANCHO' && e.source === 'posted')).toBe(true)
+  })
+})
+
+describe('fila depois do app fechado', () => {
+  // horários locais, como o agendamento
+  const d = (day: number, h: number, m = 0): Date => new Date(2026, 9, day, h, m)
+  const fmt = (ds: Date[] | null): string[] | null => ds?.map((x) => `${x.getDate()} ${x.getHours()}:${String(x.getMinutes()).padStart(2, '0')}`) ?? null
+
+  it('nada atrasado (ou só um pouco): não mexe', () => {
+    expect(reflowQueue([d(24, 19), d(24, 21, 30)], d(23, 10))).toBeNull()
+    expect(reflowQueue([d(23, 9, 45), d(24, 19)], d(23, 10))).toBeNull()
+  })
+  it('o primeiro atrasado sai agora e o resto anda no mesmo ritmo, sem rajada', () => {
+    const times = [d(19, 19), d(19, 21, 30), d(20, 19), d(20, 21, 30), d(24, 19), d(24, 21, 30)]
+    expect(fmt(reflowQueue(times, d(23, 10)))).toEqual(['23 10:00', '24 19:00', '24 21:30', '25 19:00', '25 21:30', '26 19:00'])
+  })
+  it('próximo horário a menos de 1 h: não posta agora, usa ele', () => {
+    const times = [d(20, 19), d(24, 19), d(24, 21, 30)]
+    expect(fmt(reflowQueue(times, d(24, 18, 30)))).toEqual(['24 19:00', '24 21:30', '25 19:00'])
+  })
+  it('tudo atrasado: continua nos horários do dia que a fila usava', () => {
+    expect(fmt(reflowQueue([d(19, 19), d(19, 21, 30), d(20, 19)], d(23, 10)))).toEqual(['23 10:00', '23 19:00', '23 21:30'])
+  })
+})
+
+describe('TikTok', () => {
+  it('até 64 MB vai inteiro; acima, pedaços de 10 MB com o resto no último', async () => {
+    const { chunkPlan } = await import('../src/main/posting/tiktok')
+    const MB = 1024 * 1024
+    // o vídeo de 19 MB que o TikTok recusou como "1 pedaço de 10 MB"
+    expect(chunkPlan(Math.round(19.34 * MB))).toEqual({ chunkSize: Math.round(19.34 * MB), count: 1 })
+    expect(chunkPlan(3 * MB)).toEqual({ chunkSize: 3 * MB, count: 1 })
+    expect(chunkPlan(64 * MB)).toEqual({ chunkSize: 64 * MB, count: 1 })
+    const big = Math.round(79.2 * MB)
+    const p = chunkPlan(big)
+    expect(p).toEqual({ chunkSize: 10 * MB, count: 7 })
+    const last = big - (p.count - 1) * p.chunkSize
+    expect(last).toBeGreaterThanOrEqual(5 * MB)
+    expect(last).toBeLessThanOrEqual(128 * MB)
   })
 })

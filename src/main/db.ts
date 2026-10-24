@@ -100,6 +100,8 @@ export function upgradeClip(c: Clip): Clip {
   x.hookOff ??= false
   x.captionStyle ??= null
   x.hookStyle ??= null
+  x.crop ??= null
+  if (!x.segments?.length) x.segments = [{ s: x.cutIn, e: x.cutOut }]
   if (x.wordsFrom === undefined) x.wordsFrom = x.words ? x.winStart : null
   if (x.wordsTo === undefined) x.wordsTo = x.words ? x.winEnd : null
   if (x.previewEnd === undefined) x.previewEnd = x.previewPath ? x.winEnd + 2 : null

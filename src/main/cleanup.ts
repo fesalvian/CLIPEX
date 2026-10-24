@@ -16,11 +16,15 @@ function insideFolder(file: string, folder: string): boolean {
   return f.startsWith(`${d}\\`) || f.startsWith(`${d}/`)
 }
 
-/** Data do último post de um projeto, se todos os cortes aprovados já foram publicados. */
+/**
+ * Data do último post de um projeto, se todos os cortes aprovados já foram publicados e
+ * não sobrou nenhum post na fila (agendado pra depois ou enviando).
+ */
 export function allPostedAt(projectId: string): number | null {
   const approved = clipsRepo.byProject(projectId).filter((c) => c.approved)
   if (approved.length === 0) return null
   const posts = postsRepo.all(projectId)
+  if (posts.some((p) => p.status === 'scheduled' || p.status === 'uploading')) return null
   let last = 0
   for (const c of approved) {
     const done = posts.filter((p) => p.clipId === c.id && (p.status === 'posted' || p.status === 'draft'))

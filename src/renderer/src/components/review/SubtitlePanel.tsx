@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
-import { applyDictFixes, applyDictionary, buildCues, cueText, findDictFixes, retimeCue } from '@shared/subtitles'
+import { cutsOf, toOut } from '@shared/cuts'
+import { applyDictFixes, applyDictionary, buildCuesInCuts, cueText, findDictFixes, retimeCue } from '@shared/subtitles'
 import { fmtDur } from '@shared/time'
-import type { Clip, DictEntry, SubtitleCue } from '@shared/types'
+import type { Clip, Cut, DictEntry, SubtitleCue } from '@shared/types'
 import { call } from '../../api'
 import { useStore } from '../../store'
 
@@ -13,13 +14,14 @@ interface Props {
 
 function CueRow({
   cue,
-  base,
+  cuts,
   dictionary,
   onCommit,
   onSeek
 }: {
   cue: SubtitleCue
-  base: number
+  /** trechos do corte: o tempo mostrado é o do vídeo final */
+  cuts: Cut[]
   dictionary: DictEntry[]
   onCommit: (c: SubtitleCue) => void
   onSeek: (sec: number) => void
@@ -28,7 +30,7 @@ function CueRow({
   useEffect(() => setText(cueText(cue)), [cue])
   const fixes = findDictFixes(cue, dictionary)
   const fixed = fixes.length ? cueText(applyDictFixes(cue, fixes)) : null
-  const t = fmtDur(cue.start - base)
+  const t = fmtDur(toOut(cuts, cue.start))
   return (
     <div className="cue">
       <div className="cue-line">
@@ -66,7 +68,7 @@ export function SubtitlePanel({ clip, dictionary, onSeek }: Props) {
   const upsertClip = useStore((s) => s.upsertClip)
   // mesma regra do main: sem edição, a legenda sai da transcrição já com o dicionário aplicado
   const cues = useMemo(
-    () => clip.cues ?? (clip.words ? applyDictionary(buildCues(clip.words, clip.cutIn, clip.cutOut), dictionary) : []),
+    () => clip.cues ?? (clip.words ? applyDictionary(buildCuesInCuts(clip.words, cutsOf(clip)), dictionary) : []),
     [clip, dictionary]
   )
   const flagged = cues.filter((c) => findDictFixes(c, dictionary).length > 0).length
@@ -89,7 +91,7 @@ export function SubtitlePanel({ clip, dictionary, onSeek }: Props) {
       {clip.words && cues.length === 0 && <span className="hint">Ninguém fala nesse trecho.</span>}
       <div className="cues">
         {cues.map((c) => (
-          <CueRow key={`${clip.id}-${c.id}`} cue={c} base={clip.cutIn} dictionary={dictionary} onCommit={commit} onSeek={onSeek} />
+          <CueRow key={`${clip.id}-${c.id}`} cue={c} cuts={cutsOf(clip)} dictionary={dictionary} onCommit={commit} onSeek={onSeek} />
         ))}
       </div>
       {clip.cues && (

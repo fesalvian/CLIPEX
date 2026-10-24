@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { SchedulePreviewItem, ScheduleRequest } from '@shared/ipc'
 import type { PlatformRules } from '@shared/platformRules'
+import { clipDuration, cutsOf, toOut, zoomPoint } from '@shared/cuts'
 import { fmtDur } from '@shared/time'
 import type { Clip, LlmProvider, Network, Post, ScheduleSuggestion } from '@shared/types'
 import { call, errorText } from '../api'
 import { AppHeader } from '../components/AppHeader'
 import { Icon } from '../components/Icon'
 import { Preview916 } from '../components/Preview916'
+import { RawGoneNotice } from '../components/RawGoneNotice'
 import { CaptionsPanel } from '../components/review/CaptionsPanel'
 import { DictionaryPanel } from '../components/review/DictionaryPanel'
 import { HookPanel } from '../components/review/HookPanel'
@@ -15,15 +17,10 @@ import { SubtitlePanel } from '../components/review/SubtitlePanel'
 import type { TextKind, TextPatch } from '../components/TextLayer'
 import { usePreviewPlayer } from '../lib/player'
 import { captionStyleFor, hookStyleFor, hookTextFor } from '@shared/text'
-import { clipLabel, clipList, useStore } from '../store'
+import { clipLabel, clipList, clipSub, useStore } from '../store'
 
 const NETS: Network[] = ['instagram', 'youtube', 'tiktok']
 
-function zoomOf(c: Clip): number | null {
-  if (!c.zoomEnabled) return null
-  const at = c.zoomAt ?? c.peakSec
-  return at >= c.cutIn && at <= c.cutOut ? at : (c.cutIn + c.cutOut) / 2
-}
 
 interface Status {
   label: string
@@ -31,7 +28,10 @@ interface Status {
   title?: string
 }
 
-function clipStatus(c: Clip): Status {
+function clipStatus(c: Clip, rawGone: boolean): Status {
+  // sem o bruto não renderiza de novo: vale o último vídeo gerado
+  if (rawGone && c.render.path && c.render.status !== 'done') return { label: 'Usa o último render', kind: 'ok' }
+  if (rawGone && !c.render.path) return { label: 'Sem render · bruto apagado', kind: 'error' }
   if (c.prep === 'error') return { label: 'Erro na preparação', kind: 'error', title: c.prepMessage ?? '' }
   if (c.prep === 'queued') return { label: 'Na fila', kind: 'wait' }
   if (c.prep === 'working') return { label: c.prepMessage ?? 'Preparando', kind: 'busy' }
@@ -73,10 +73,17 @@ const RHYTHMS: { v: number | null; label: string }[] = [
   { v: 10, label: '10 por dia' }
 ]
 
-function rhythmHint(perDay: number | null, count: number, mode: 'now' | 'sched'): string {
-  const first = mode === 'now' ? 'O melhor corte sai agora' : 'O melhor corte sai na data e hora acima'
+function rhythmHint(perDay: number | null, count: number, mode: 'now' | 'sched', nowCount: number): string {
+  const lead = mode === 'now' ? Math.min(nowCount, count) : 1
+  const first =
+    mode === 'now'
+      ? lead === 1
+        ? 'O melhor corte sai agora'
+        : `Os ${lead} melhores cortes saem agora`
+      : 'O melhor corte sai na data e hora acima'
   if (!perDay) return mode === 'now' ? 'Todos os cortes saem agora.' : 'Todos os cortes saem na data e hora acima.'
-  const days = Math.ceil(count / perDay)
+  if (lead >= count) return `${first}.`
+  const days = Math.ceil((count - lead) / perDay)
   if (perDay === 1 && mode === 'sched') return `${first}; um por dia, sempre nesse horário (${days} ${days === 1 ? 'dia' : 'dias'}).`
   return `${first}; o resto vai nos melhores horários de cada rede, ${perDay} por dia (${days} ${days === 1 ? 'dia' : 'dias'}).`
 }
@@ -116,6 +123,8 @@ export function Revisar() {
   const [provider, setProvider] = useState<LlmProvider>(settings?.llmProvider ?? 'openai')
   const [nets, setNets] = useState<Record<Network, boolean>>({ instagram: true, youtube: true, tiktok: true })
   const [mode, setMode] = useState<'now' | 'sched'>('sched')
+  /** "Postar agora N e agendar o resto": vazio = 1 */
+  const [nowText, setNowText] = useState('1')
   const [suggest, setSuggest] = useState<ScheduleSuggestion[]>([])
   const [date, setDate] = useState('')
   const [time, setTime] = useState('19:30')
@@ -166,6 +175,7 @@ export function Revisar() {
   }
 
   const chosen = NETS.filter((n) => nets[n])
+  const nowCount = Math.max(1, Math.floor(Number(nowText)) || 1)
   const firstAt = mode === 'sched' && date ? new Date(`${date}T${time}:00`).toISOString() : null
   const sugg = suggest.find((s) => s.network === (chosen[0] ?? 'instagram'))
 
@@ -175,7 +185,7 @@ export function Revisar() {
       toast('error', 'Esse horário já passou. Escolha outro ou use "Postar agora".')
       return
     }
-    const req: ScheduleRequest = { clipIds, networks: chosen, firstAt, perDay: rhythm }
+    const req: ScheduleRequest = { clipIds, networks: chosen, firstAt, perDay: rhythm, nowCount: mode === 'now' ? nowCount : undefined }
     try {
       setConfirm({ req, items: await call('posts:preview', req) })
     } catch (e) {
@@ -196,6 +206,16 @@ export function Revisar() {
       clips.map((c) => c.id),
       perDay
     )
+  }
+
+  const selFailed = sel ? posts.filter((p) => p.clipId === sel.id && p.status === 'failed') : []
+  const retryPost = async (id: string): Promise<void> => {
+    try {
+      await call('posts:retry', id)
+      toast('info', 'Enviando de novo.')
+    } catch (e) {
+      toast('error', errorText(e))
+    }
   }
 
   const download = async (which: 'one' | 'all'): Promise<void> => {
@@ -223,7 +243,7 @@ export function Revisar() {
       ? 'Escolha onde postar'
       : `${mode === 'sched' ? 'Agendar' : 'Postar agora'} em ${chosen.length} ${chosen.length === 1 ? 'rede' : 'redes'}`
 
-  const zoomAt = sel ? zoomOf(sel) : null
+  const zoomAt = sel ? zoomPoint(sel) : null
   // enquanto arrasta um texto, o preview usa a posição provisória
   const textClip = sel ? { ...sel, ...(textDraft?.clipId === sel.id ? textDraft.patch : {}) } : null
 
@@ -269,9 +289,10 @@ export function Revisar() {
       ) : (
         <main className="screen review">
           <section aria-label="Cortes" className="col-cards">
+            <RawGoneNotice project={project} />
             <span className="label">Cortes aprovados</span>
             {clips.map((c) => {
-              const st = clipStatus(c)
+              const st = clipStatus(c, !!project.rawDeletedAt)
               const on = sel?.id === c.id
               const pl = postLine(posts.filter((p) => p.clipId === c.id))
               return (
@@ -282,9 +303,9 @@ export function Revisar() {
                   </span>
                   <span className="review-card-text">
                     <span style={{ fontWeight: 600, fontSize: 14 }}>{clipLabel(c)}</span>
-                    {c.llm?.title && <span className="review-card-title">{c.llm.title}</span>}
+                    {clipSub(c) && <span className="review-card-title">{clipSub(c)}</span>}
                     <span className="mono" style={{ fontSize: 12, color: 'var(--muted)' }}>
-                      {fmtDur(c.cutOut - c.cutIn)}
+                      {fmtDur(clipDuration(c))}
                     </span>
                     <span className={`chip ${CHIP_CLASS[st.kind]}`} title={st.title} style={{ fontSize: 11, padding: '2px 8px' }}>
                       {st.kind === 'busy' && <span className="spinner" style={{ width: 9, height: 9 }} />}
@@ -302,7 +323,7 @@ export function Revisar() {
             <section aria-label="Preview do corte" className="review-preview">
               <Preview916
                 clip={textClip}
-                crop={project.crop}
+                crop={sel.crop ?? project.crop}
                 player={player}
                 width={280}
                 captionStyle={captionStyleFor(textClip, settings.text)}
@@ -323,16 +344,16 @@ export function Revisar() {
                 <span style={{ flexGrow: 1 }}>Zoom na webcam no pico</span>
                 {zoomAt !== null && (
                   <span className="mono" style={{ fontSize: 12, color: 'var(--cam-soft)' }}>
-                    {fmtDur(zoomAt - sel.cutIn)}
+                    {fmtDur(toOut(cutsOf(sel), zoomAt))}
                   </span>
                 )}
               </label>
               {sel.zoomEnabled && (
                 <button className="btn xs" onClick={() => void patchClip(sel.id, { zoomAt: player.time })}>
-                  Zoom na posição atual ({fmtDur(player.time - sel.cutIn)})
+                  Zoom na posição atual ({fmtDur(toOut(cutsOf(sel), player.time))})
                 </button>
               )}
-              <RenderStatus clip={sel} projectId={project.id} />
+              <RenderStatus clip={sel} projectId={project.id} rawGone={!!project.rawDeletedAt} />
             </section>
           )}
 
@@ -394,18 +415,23 @@ export function Revisar() {
 
               <div className="panel">
                 <span className="panel-title">Quando</span>
-                <div
-                  className="seg well"
-                  role="group"
-                  aria-label="Quando postar"
-                  style={{ gridTemplateColumns: 'repeat(2, minmax(0, 1fr))' }}
-                >
-                  <button aria-pressed={mode === 'now'} onClick={() => setMode('now')}>
+                <div className="now-row">
+                  <label className="now-check">
+                    <input type="checkbox" checked={mode === 'now'} onChange={(e) => setMode(e.target.checked ? 'now' : 'sched')} />
                     Postar agora
-                  </button>
-                  <button aria-pressed={mode === 'sched'} onClick={() => setMode('sched')}>
-                    Agendar
-                  </button>
+                  </label>
+                  <input
+                    className="input mono now-count"
+                    type="number"
+                    min={1}
+                    max={Math.max(1, clips.length)}
+                    placeholder="1"
+                    value={nowText}
+                    disabled={mode !== 'now'}
+                    aria-label="Quantos cortes postar agora"
+                    onChange={(e) => setNowText(e.target.value)}
+                  />
+                  <span className="hint">{nowCount === 1 ? 'corte' : 'cortes'} e agendar o resto</span>
                 </div>
                 {mode === 'sched' && (
                   <>
@@ -439,7 +465,7 @@ export function Revisar() {
                       </button>
                     ))}
                   </div>
-                  <span className="hint">{rhythmHint(perDay, clips.length, mode)}</span>
+                  <span className="hint">{rhythmHint(perDay, clips.length, mode, nowCount)}</span>
                   {slots && (
                     <div className="slot-list">
                       {chosen.map((n) => (
@@ -451,6 +477,22 @@ export function Revisar() {
                   )}
                 </div>
               </div>
+
+              {selFailed.length > 0 && (
+                <div className="callout error" role="alert" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+                  {selFailed.map((p) => (
+                    <div key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <Icon name="alert" color="#FF8A8A" />
+                      <span style={{ flex: 1, minWidth: 0 }}>
+                        <b>{rules[p.network].label}</b> falhou: {p.error?.split('\n')[0] ?? 'erro desconhecido'}
+                      </span>
+                      <button className="btn" onClick={() => void retryPost(p.id)}>
+                        <Icon name="refresh" size={15} /> Tentar de novo
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
 
               <button className="btn primary lg" disabled={chosen.length === 0} onClick={() => void openConfirm([sel.id], null)}>
                 {ctaLabel}
@@ -487,8 +529,21 @@ export function Revisar() {
   )
 }
 
-function RenderStatus({ clip, projectId }: { clip: Clip; projectId: string }) {
+function RenderStatus({ clip, projectId, rawGone }: { clip: Clip; projectId: string; rawGone: boolean }) {
   const r = clip.render
+  if (rawGone) {
+    return (
+      <div className="render-status">
+        {r.path ? (
+          <button className="btn xs" onClick={() => void call('projects:open-folder', projectId)}>
+            <Icon name="folder" size={13} /> Último vídeo renderizado · abrir pasta
+          </button>
+        ) : (
+          <span style={{ fontSize: 11, color: 'var(--danger)' }}>Este corte nunca foi renderizado e o bruto foi apagado.</span>
+        )}
+      </div>
+    )
+  }
   return (
     <div className="render-status">
       {r.status === 'rendering' && (

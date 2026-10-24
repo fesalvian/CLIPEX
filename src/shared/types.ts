@@ -17,6 +17,12 @@ export interface Rect {
   h: number
 }
 
+/** Trecho de um corte na linha do tempo da live (s). */
+export interface Cut {
+  s: number
+  e: number
+}
+
 export interface CropLayout {
   cam: Rect
   game: Rect
@@ -153,8 +159,11 @@ export interface Clip {
   peakSec: number
   winStart: number
   winEnd: number
+  /** início do primeiro trecho e fim do último */
   cutIn: number
   cutOut: number
+  /** trechos que viram o vídeo (corte seco entre eles), em ordem e sem sobrepor */
+  segments: Cut[]
   /** true enquanto o corte é o sugerido (a IA pode ajustar); vira false quando o usuário mexe */
   autoCut: boolean
   signalScore: number
@@ -165,6 +174,8 @@ export interface Clip {
   approved: boolean
   layout: ClipLayout
   camSplit: CamSplit
+  /** recorte próprio deste corte; null = segue o recorte padrão do projeto */
+  crop: CropLayout | null
   /** sugestão da IA escolhida; null = segue o padrão das configurações */
   hookChoice: number | null
   hookCustom: string
@@ -181,6 +192,7 @@ export interface Clip {
   wordsTo: number | null
   cues: SubtitleCue[] | null
   captions: Captions | null
+  /** logo própria deste corte; null = segue o padrão das configurações */
   watermark: Watermark | null
   previewPath: string | null
   previewStart: number | null
@@ -291,6 +303,8 @@ export interface Settings {
   watermark: Watermark
   dictionary: DictEntry[]
   deleteRawAfterDays: number | null
+  /** abre com o Windows, direto na bandeja (app instalado) */
+  startWithWindows: boolean
   musicMode: 'mute' | 'low'
   encoder: 'auto' | 'nvenc' | 'amf' | 'x264'
   windowSec: number

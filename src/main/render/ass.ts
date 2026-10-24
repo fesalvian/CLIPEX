@@ -3,14 +3,17 @@
 // do corte (src/shared/text.ts), as mesmas contas que o preview usa.
 
 import { OUT_H, OUT_W } from '@shared/consts'
+import { cutsDuration, toOut } from '@shared/cuts'
 import { ANIM, TEXT_MARGIN, captionTextTop, displayText, typewriterStep } from '@shared/text'
-import type { CaptionStyle, HookStyle, SubtitleCue } from '@shared/types'
+import type { CaptionStyle, Cut, HookStyle, SubtitleCue } from '@shared/types'
 
 export interface AssConfig {
   cues: SubtitleCue[]
   hook: string | null
   cutIn: number
   cutOut: number
+  /** trechos do corte (sem = um só, de cutIn a cutOut); a legenda segue o vídeo com eles colados */
+  cuts?: Cut[]
   caption: CaptionStyle & { y: number }
   hookStyle: HookStyle & { y: number }
   /** a família é negrito no arquivo (o libass precisa do Bold=-1 pra achar) */
@@ -67,7 +70,8 @@ export function wrapMargins(boxWidth: number): string {
 }
 
 export function buildAss(c: AssConfig): string {
-  const dur = Math.max(0.1, c.cutOut - c.cutIn)
+  const cuts = c.cuts?.length ? c.cuts : [{ s: c.cutIn, e: c.cutOut }]
+  const dur = Math.max(0.1, cutsDuration(cuts))
   const cap = c.caption
   const hk = c.hookStyle
   const bold = (f: string): number => (c.isBold?.(f) ? -1 : 0)
@@ -131,8 +135,8 @@ export function buildAss(c: AssConfig): string {
     for (let i = 0; i < words.length; i++) {
       const start = i === 0 ? cue.start : words[i]!.s
       const end = i === words.length - 1 ? cueEnd : words[i + 1]!.s
-      const a = Math.max(0, start - c.cutIn)
-      const b = Math.min(dur, end - c.cutIn)
+      const a = Math.max(0, toOut(cuts, start))
+      const b = Math.min(dur, toOut(cuts, end))
       if (b - a < 0.02) continue
       // presa pelo topo (\an8): linhas a mais crescem pra baixo, a logo acima não é coberta
       let tags = `\\an8\\pos(${Math.round(cap.x)},${captionTextTop(cap)})`

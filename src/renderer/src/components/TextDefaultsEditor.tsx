@@ -144,7 +144,7 @@ export function TextDefaultsEditor() {
               cue={mode === 'play' ? cue : null}
               sampleCue={DEMO[1]!}
               t={t}
-              clipStart={0}
+              elapsed={0}
               editing={mode === 'place'}
               onChange={(kind, p) => (kind === 'caption' ? cap(p) : hk(p))}
             />

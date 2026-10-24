@@ -6,7 +6,8 @@ import { execFile } from 'node:child_process'
 import { existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
-import { mergeCues, whisperPrompt } from '@shared/subtitles'
+import { cutsOf } from '@shared/cuts'
+import { mergeCuesInCuts, whisperPrompt } from '@shared/subtitles'
 import type { Clip, Project, StageKey, Word } from '@shared/types'
 import { buildTimeline, pickCandidates } from './analysis/candidates'
 import { splitEvents } from './analysis/events'
@@ -84,6 +85,11 @@ async function stage<T>(id: string, key: StageKey, fn: (progress: (v: number) =>
 
 const queue: string[] = []
 let running: string | null = null
+
+/** Alguma live sendo (ou esperando pra ser) analisada. */
+export function analysisBusy(): boolean {
+  return running !== null || queue.length > 0
+}
 
 export function enqueueAnalysis(projectId: string): void {
   if (running === projectId || queue.includes(projectId)) return
@@ -317,7 +323,7 @@ export async function transcribeClip(clipId: string, opts: { priority?: boolean 
       c.wordsFrom = from
       c.wordsTo = to
       // legenda ganha os trechos novos sem perder edições
-      if (c.cues) c.cues = mergeCues(c.cues, words, c.cutIn, c.cutOut, getSettings().dictionary)
+      if (c.cues) c.cues = mergeCuesInCuts(c.cues, words, cutsOf(c), getSettings().dictionary)
     })
   }, opts)
 }
@@ -347,10 +353,14 @@ export async function rankClip(clipId: string): Promise<Clip | null> {
       if (c.autoCut) {
         c.cutIn = insight.suggestedIn
         c.cutOut = insight.suggestedOut
+        c.segments = [{ s: c.cutIn, e: c.cutOut }]
       }
     })
   })
 }
+
+/** janela da timeline acima disso (s): o preview cobre só o corte */
+const PREVIEW_WINDOW_MAX = 4 * 60
 
 function previewCovers(c: Clip): boolean {
   return (
@@ -379,8 +389,10 @@ export async function makePreview(clipId: string, opts: { priority?: boolean } =
     const cur = clipsRepo.get(clipId)
     if (!cur) return null
     if (previewCovers(cur)) return cur
-    const start = Math.max(0, Math.min(cur.winStart, cur.cutIn) - 2)
-    const end = Math.min(p.source!.durationSec, Math.max(cur.winEnd, cur.cutOut) + 2)
+    // timeline afastada (janela grande): só o corte, pra não gerar minutos de vídeo à toa
+    const wide = cur.winEnd - cur.winStart > PREVIEW_WINDOW_MAX
+    const start = Math.max(0, (wide ? cur.cutIn : Math.min(cur.winStart, cur.cutIn)) - 2)
+    const end = Math.min(p.source!.durationSec, (wide ? cur.cutOut : Math.max(cur.winEnd, cur.cutOut)) + 2)
     // nome muda a cada versão: o <video> da tela não fica com o arquivo velho em cache
     const out = join(f.previews, `${cur.id}_${Math.round(start)}.mp4`)
     const enc = await videoEncoder()

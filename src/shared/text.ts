@@ -112,6 +112,21 @@ export function hookTextFor(c: Pick<Clip, 'hookOff' | 'hookCustom' | 'hookChoice
   return c.llm?.hooks[0] ?? null
 }
 
+type ClipNameFields = Pick<Clip, 'number' | 'hookOff' | 'hookCustom' | 'hookChoice' | 'llm' | 'hookStyle'>
+
+/** Texto que identifica o corte além do número: o gancho do vídeo (ou o título da IA, sem gancho). */
+export function clipSubtitle(c: ClipNameFields, d: TextDefaults): string | null {
+  return hookTextFor(c, d) ?? c.llm?.title ?? null
+}
+
+/** "Clipe 07 · TEXTO DO GANCHO", cortado em `max` caracteres. */
+export function clipTitle(c: ClipNameFields, d: TextDefaults, max = 60): string {
+  const base = `Clipe ${String(c.number).padStart(2, '0')}`
+  const sub = clipSubtitle(c, d)
+  if (!sub) return base
+  return `${base} · ${sub.length > max ? `${sub.slice(0, max - 1).trimEnd()}…` : sub}`
+}
+
 /**
  * A legenda é presa pelo topo: `y` é o centro da PRIMEIRA linha e as linhas a mais crescem
  * pra baixo. Assim o topo não muda com o número de linhas e a logo acima nunca é coberta.
