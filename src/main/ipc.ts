@@ -17,12 +17,16 @@ import { enqueueAnalysis, ensureCoverage, loudnessOf, makePreview, processClip, 
 import { importFonts, listFonts, removeFont } from './fonts'
 import { trimTransparent } from './image'
 import { applyTidy, cancelPost, clients, planSchedule, planTidy, postsOverview, retryPost, schedulePosts } from './posting/scheduler'
+import { setInstagramToken } from './posting/instagram'
 import { applyDictionaryToClip, generateCaptions, generateHooks, prepareClips } from './prepare'
-import { createProject, deleteProject, listSummaries, saveProject } from './projects'
+import { activeProfile, createProfile, deleteProfile, listProfiles, selectProfile, updateProfile } from './profiles'
+import { createProject, deleteProject, listSummaries, publishProjects, saveProject } from './projects'
 import { cancelRender, enqueueRender, markProjectStale } from './render/queue'
-import { getSettings, platformRules, resetWatchSince, updateSettings } from './settings'
+import { activeProfileId, getSettings, platformRules, resetWatchSince, updateSettings } from './settings'
+import { checkSource, importVideoUrl, setSource, sourceStatus } from './sources'
 import { importTwitchVod, isTwitchVodUrl } from './twitch'
 import { startWatcher, watcherStatus } from './watcher'
+import { ensureFaces } from './faces'
 import { postsRepo } from './db'
 import { applyAutostart } from './autostart'
 import { emit, toast } from './bus'
@@ -47,6 +51,26 @@ function win(): BrowserWindow | undefined {
 export function registerIpc(): void {
   handle('app:info', () => ({ version: app.getVersion(), userData: userDataDir(), isDev }))
   handle('app:platform-rules', () => platformRules())
+
+  // ---------- perfis ----------
+  handle('profiles:list', () => listProfiles())
+  handle('profiles:active', () => activeProfileId())
+  handle('profiles:select', (id) => {
+    const p = selectProfile(id)
+    publishProjects()
+    emit('watcher:changed', watcherStatus())
+    return p
+  })
+  handle('profiles:create', (input) => createProfile(input))
+  handle('profiles:update', (id, patch) => updateProfile(id, patch))
+  handle('profiles:delete', (id) => {
+    const list = deleteProfile(id, deleteProject)
+    publishProjects()
+    return list
+  })
+  handle('sources:set', (patch) => setSource(activeProfileId(), patch))
+  handle('sources:check', () => void checkSource(activeProfileId()))
+  handle('sources:status', () => sourceStatus(activeProfileId()))
 
   // ---------- projetos ----------
   handle('projects:list', () => listSummaries())
@@ -80,6 +104,9 @@ export function registerIpc(): void {
     if (!isTwitchVodUrl(url)) throw new Error('Cole o link de um vídeo da Twitch (twitch.tv/videos/...).')
     void importTwitchVod(url).catch((e: Error) => toast('error', e.message))
   })
+  handle('projects:import-url', (url) => {
+    void importVideoUrl(url)
+  })
   handle('projects:delete', (id) => deleteProject(id))
   handle('projects:reanalyze', (id) => reanalyze(id))
   handle('projects:retry', (id) => retryAnalysis(id))
@@ -88,7 +115,7 @@ export function registerIpc(): void {
     if (!p) throw new Error('Projeto não encontrado')
     // recorte padrão do projeto = vale pra todos os cortes: os recortes próprios voltam pro padrão
     p.crop = crop
-    if (saveAsPreset) updateSettings({ cropPreset: crop })
+    if (saveAsPreset) updateSettings({ cropPreset: crop }, p.profileId)
     for (const c of clipsRepo.byProject(id)) if (c.crop) updateClip(c.id, { crop: null })
     markProjectStale(id)
     return saveProject(p)
@@ -109,7 +136,11 @@ export function registerIpc(): void {
   handle('clips:update', (id, patch) => {
     const c = updateClip(id, patch)
     // corte arrastado pra fora do que já tem preview/transcrição: gera o que falta
-    if (patch.cutIn !== undefined || patch.cutOut !== undefined || patch.winStart !== undefined) ensureCoverage(id)
+    if (patch.cutIn !== undefined || patch.cutOut !== undefined || patch.winStart !== undefined || patch.segments !== undefined) {
+      ensureCoverage(id)
+    }
+    // virou "seguir quem fala": calcula a câmera
+    if (c.layout === 'face') void ensureFaces(id).catch(() => undefined)
     return c
   })
   handle('clips:create-manual', (projectId, at) => {
@@ -134,6 +165,11 @@ export function registerIpc(): void {
   })
   handle('clips:prepare', (ids) => prepareClips(ids))
   handle('clips:apply-dictionary', (id) => applyDictionaryToClip(id))
+  handle('clips:ensure-faces', async (id) => {
+    const c = await ensureFaces(id)
+    if (!c) throw new Error('Corte não encontrado')
+    return c
+  })
   handle('clips:reset-cues', (id) => {
     const c = clipsRepo.get(id)
     if (!c) throw new Error('Corte não encontrado')
@@ -169,7 +205,7 @@ export function registerIpc(): void {
   handle('style:remove', (id) => removeExample(id))
   handle('posts:connect', async (network) => {
     try {
-      await clients[network].connect()
+      await clients[network].connect(activeProfileId())
       return { ok: true, error: null }
     } catch (e) {
       return { ok: false, error: (e as Error).message }
@@ -179,7 +215,7 @@ export function registerIpc(): void {
     const out = {} as Record<Network, { connected: boolean; account: string | null }>
     await Promise.all(
       NETWORKS.map(async (n) => {
-        out[n] = await clients[n].connected().catch(() => ({ connected: false, account: null }))
+        out[n] = await clients[n].connected(activeProfileId()).catch(() => ({ connected: false, account: null }))
       })
     )
     return out
@@ -194,8 +230,8 @@ export function registerIpc(): void {
     if (patch.watchFolder !== undefined || patch.watchEnabled !== undefined) startWatcher()
     if (patch.startWithWindows !== undefined) applyAutostart(patch.startWithWindows)
     if (patch.watermark || patch.text) {
-      // padrão global mudou (marca d'água ou textos): renders prontos ficam velhos
-      for (const p of projectsRepo.all()) markProjectStale(p.id)
+      // padrão do perfil mudou (marca d'água ou textos): renders prontos do perfil ficam velhos
+      for (const p of projectsRepo.all()) if (p.profileId === activeProfileId()) markProjectStale(p.id)
     }
     return next
   })
@@ -218,6 +254,15 @@ export function registerIpc(): void {
   })
   handle('settings:set-openai-key', (key) => setEnv('OPENAI_API_KEY', key))
   handle('settings:has-openai-key', () => env('OPENAI_API_KEY').length > 0)
+  handle('settings:set-instagram-token', async (token) => {
+    try {
+      await setInstagramToken(activeProfileId(), token)
+      await clients.instagram.connect(activeProfileId())
+      return { ok: true, error: null }
+    } catch (e) {
+      return { ok: false, error: (e as Error).message }
+    }
+  })
 
   handle('watermark:pick', async () => {
     const w = win()

@@ -7,6 +7,7 @@ import { existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync }
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { cutsOf } from '@shared/cuts'
+import { overlapRatio, readWindow, snapToSpeech, transcriptChunks, type Span } from '@shared/moments'
 import { mergeCuesInCuts, whisperPrompt } from '@shared/subtitles'
 import type { Clip, Project, StageKey, Word } from '@shared/types'
 import { buildTimeline, pickCandidates } from './analysis/candidates'
@@ -22,13 +23,25 @@ import { clipsRepo, projectsRepo } from './db'
 import { audioExtractArgs, frameArgs, previewSegmentArgs, probeArgs, proxyArgs } from './ffmpeg/args'
 import { analysisTrack, parseProbe, previewTrack } from './ffmpeg/probe'
 import { performanceHint } from './learning'
+import { ensureFaces } from './faces'
 import { llmClient } from './llm'
-import { normalizeRank, RANK_SCHEMA, rankPrompt, type RankOutput } from './llm/prompts'
+import {
+  channelIntro,
+  normalizeMoment,
+  normalizeRank,
+  RANK_SCHEMA,
+  rankPrompt,
+  SEGMENT_SCHEMA,
+  segmentPrompt,
+  type RankOutput,
+  type SegmentOutput
+} from './llm/prompts'
 import { ensureDir } from './paths'
 import { ffmpegProgress, runProcess } from './proc'
+import { getProfile } from './profiles'
 import { saveProject, setStage } from './projects'
 import { llmLane, previewLane, proxyLane, whisperLane } from './sema'
-import { getSettings } from './settings'
+import { projectSettings } from './settings'
 import { hookStyleBlock } from './style'
 
 const pexec = promisify(execFile)
@@ -40,6 +53,10 @@ function files(p: Project) {
     events: join(p.dir, 'events.f32'),
     frame: join(p.dir, 'frame.jpg'),
     proxy: join(p.dir, 'proxy.mp4'),
+    /** podcast: transcrição do episódio inteiro (vai crescendo pedaço a pedaço) */
+    transcript: join(p.dir, 'transcript.json'),
+    /** podcast: pedaços que a IA já leu procurando conversas */
+    segmented: join(p.dir, 'segmented.json'),
     previews: ensureDir(join(p.dir, 'previews')),
     tmp: ensureDir(join(p.dir, 'tmp'))
   }
@@ -82,6 +99,14 @@ async function stage<T>(id: string, key: StageKey, fn: (progress: (v: number) =>
 }
 
 // ---------------- fila de projetos ----------------
+
+type DoneListener = (projectId: string) => void
+const doneListeners: DoneListener[] = []
+
+/** Avisa quando a análise de um projeto termina (a postagem automática entra aqui). */
+export function onAnalysisDone(fn: DoneListener): void {
+  doneListeners.push(fn)
+}
 
 const queue: string[] = []
 let running: string | null = null
@@ -151,6 +176,8 @@ export function reanalyze(projectId: string): void {
   for (const k of ['events', 'candidates', 'transcribe', 'rank', 'previews'] as StageKey[]) {
     p.stages[k] = { status: 'pending', progress: 0 }
   }
+  // podcast: a transcrição do episódio fica (é o mais demorado); a IA lê tudo de novo
+  rmSync(files(p).segmented, { force: true })
   p.status = 'queued'
   p.error = null
   saveProject(p, { list: true })
@@ -225,7 +252,7 @@ function findCandidates(p: Project): Clip[] {
   const f = files(p)
   const existing = clipsRepo.byProject(p.id)
   if (existing.some((c) => c.origin === 'auto')) return existing
-  const s = getSettings()
+  const s = projectSettings(p.id)
   const loud = readFloat32(f.loud)
   const events = existsSync(f.events) ? splitEvents(readFloat32(f.events)) : null
   const tl = buildTimeline(loud, events, p.source!.durationSec)
@@ -243,12 +270,20 @@ function findCandidates(p: Project): Clip[] {
 }
 
 async function transcribeRange(p: Project, clipId: string, from: number, to: number): Promise<Word[]> {
+  // podcast: o episódio inteiro já foi transcrito; só recorta
+  const full = transcriptSlice(p, from, to)
+  if (full) return full
+  return whisperRange(p, `${clipId}_${Math.round(from)}`, from, to)
+}
+
+/** Roda o Whisper num pedaço do áudio extraído (tempo do arquivo original). */
+async function whisperRange(p: Project, name: string, from: number, to: number): Promise<Word[]> {
   const f = files(p)
   const exe = whisperExe()
   const model = whisperModelPath()
   if (!exe || !model) throw new Error('Whisper não instalado. Baixe em Configurações › Componentes de IA.')
   if (!existsSync(f.wav)) throw new Error('Áudio do microfone ainda não foi extraído.')
-  const slice = join(f.tmp, `${clipId}_${Math.round(from)}.wav`)
+  const slice = join(f.tmp, `${name}.wav`)
   const reader = new WavReader(f.wav, statSync(f.wav).size)
   try {
     writeWavSlice(reader, from, to, slice)
@@ -260,14 +295,184 @@ async function transcribeRange(p: Project, clipId: string, from: number, to: num
       exe,
       model,
       wav: slice,
-      outBase: join(f.tmp, `${clipId}_${Math.round(from)}`),
+      outBase: join(f.tmp, name),
       offsetSec: from,
-      prompt: whisperPrompt(getSettings().dictionary),
+      prompt: whisperPrompt(projectSettings(p.id).dictionary),
       useGpu: true
     }).done
   } finally {
     rmSync(slice, { force: true })
   }
+}
+
+// ---------------- podcast: transcrição do episódio inteiro ----------------
+
+interface Transcript {
+  /** até onde o episódio já foi transcrito (s) */
+  to: number
+  words: Word[]
+}
+
+const transcriptCache = new Map<string, { mtime: number; data: Transcript }>()
+
+function readTranscript(p: Project): Transcript {
+  const file = files(p).transcript
+  if (!existsSync(file)) return { to: 0, words: [] }
+  const mtime = statSync(file).mtimeMs
+  const hit = transcriptCache.get(p.id)
+  if (hit && hit.mtime === mtime) return hit.data
+  const data = JSON.parse(readFileSync(file, 'utf8')) as Transcript
+  transcriptCache.set(p.id, { mtime, data })
+  return data
+}
+
+function writeTranscript(p: Project, t: Transcript): void {
+  const file = files(p).transcript
+  writeFileSync(`${file}.tmp`, JSON.stringify(t))
+  renameSync(`${file}.tmp`, file)
+  transcriptCache.delete(p.id)
+}
+
+/** Palavras de um trecho, se a transcrição do episódio já cobre ele (só podcast). */
+function transcriptSlice(p: Project, from: number, to: number): Word[] | null {
+  if (p.kind !== 'podcast') return null
+  const t = readTranscript(p)
+  const end = Math.min(to, p.source?.durationSec ?? to)
+  if (t.to < end - 0.5) return null
+  return t.words.filter((w) => w.e > from && w.s < to)
+}
+
+function readSegmented(p: Project): number[] {
+  const file = files(p).segmented
+  return existsSync(file) ? (JSON.parse(readFileSync(file, 'utf8')) as number[]) : []
+}
+
+/**
+ * A IA lê uma janela da transcrição e devolve as conversas completas; cada uma vira um corte
+ * (já com nota, título e ganchos), encaixado no começo e no fim das frases.
+ */
+async function segmentWindow(p: Project, chunks: Span[], i: number): Promise<Clip[]> {
+  const win = readWindow(chunks, i)
+  const all = readTranscript(p).words
+  const words = all.filter((w) => w.s >= win.s - 0.05 && w.s < win.e)
+  if (words.length < 30) return []
+  const profile = getProfile(p.profileId)
+  const s = projectSettings(p.id)
+  const existing = clipsRepo.byProject(p.id)
+  if (existing.filter((c) => c.origin === 'auto').length >= s.maxCandidates) return []
+  const minSec = 20
+  const maxSec = Math.max(minSec + 10, profile.autoPost.maxClipSec)
+  const taken = existing
+    .filter((c) => c.cutOut > win.s && c.cutIn < win.e)
+    .map((c) => ({ s: Math.max(0, c.cutIn - win.s), e: Math.min(win.e, c.cutOut) - win.s }))
+  const { out, provider } = await llmLane.run(async () => {
+    const client = await llmClient()
+    const { system, user } = segmentPrompt({
+      channel: channelIntro(profile),
+      style: hookStyleBlock(profile.id, p.game),
+      words,
+      from: win.s,
+      to: win.e,
+      maxMoments: Math.max(1, Math.round((win.e - win.s) / 60 / 3.5)),
+      minSec,
+      maxSec,
+      taken,
+      performanceHint: performanceHint(profile.id)
+    })
+    return { out: await client.chatJson<SegmentOutput>(system, user, SEGMENT_SCHEMA), provider: client.provider }
+  })
+  const dur = p.source!.durationSec
+  const spans: Span[] = existing.map((c) => ({ s: c.cutIn, e: c.cutOut }))
+  let n = existing.reduce((m, c) => Math.max(m, c.number), 0)
+  const created: Clip[] = []
+  const moments = [...(out.moments ?? [])].sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+  for (const m of moments) {
+    if (!Number.isFinite(m.start) || !Number.isFinite(m.end)) continue
+    const span = snapToSpeech(all, win.s + m.start, win.s + m.end, { minSec, maxSec })
+    if (!span || spans.some((x) => overlapRatio(x, span) > 0.4)) continue
+    spans.push(span)
+    const meta = normalizeMoment(m)
+    const winStart = Math.max(0, span.s - 20)
+    const winEnd = Math.min(dur, span.e + 20)
+    const clip = newClip(
+      p,
+      { peak: span.s + (span.e - span.s) * 0.6, winStart, winEnd, cutIn: span.s, cutOut: span.e, score: meta.score / 100, tags: ['talk'] },
+      ++n
+    )
+    clip.words = all.filter((w) => w.e > winStart && w.s < winEnd)
+    clip.wordsFrom = winStart
+    clip.wordsTo = winEnd
+    clip.llm = { ...meta, suggestedIn: span.s, suggestedOut: span.e, provider }
+    clip.stage = 'ready'
+    created.push(clip)
+  }
+  if (created.length) {
+    clipsRepo.saveMany(created)
+    emit('clips:added', created)
+    for (const c of created) void makePreview(c.id).catch(() => undefined)
+  }
+  return created
+}
+
+/**
+ * Podcast: transcreve o episódio em pedaços de 10 min; cada pedaço pronto já vai pra IA
+ * achar as conversas, então os primeiros cortes aparecem enquanto o resto é transcrito.
+ */
+async function analyzePodcast(p: Project): Promise<void> {
+  const f = files(p)
+  const dur = p.source!.durationSec
+  const chunks = transcriptChunks(dur)
+  const done = new Set(readSegmented(p))
+  const markDone = (i: number): void => {
+    done.add(i)
+    writeFileSync(f.segmented, JSON.stringify([...done]))
+    setStage(p.id, 'candidates', { progress: done.size / chunks.length })
+  }
+  setStage(p.id, 'events', { status: 'skipped', message: 'Podcast: a IA lê a conversa inteira' })
+  setStage(p.id, 'rank', { status: 'skipped', message: 'A nota vem junto com as conversas' })
+  setStage(p.id, 'candidates', { status: 'running', progress: done.size / chunks.length, message: undefined })
+  let segError: string | null = null
+  let found = 0
+  const jobs: Promise<void>[] = []
+  const segment = (i: number): void => {
+    if (done.has(i)) return
+    jobs.push(
+      segmentWindow(projectsRepo.get(p.id)!, chunks, i).then(
+        (list) => {
+          found += list.length
+          markDone(i)
+        },
+        (e: unknown) => {
+          segError ??= errMsg(e)
+        }
+      )
+    )
+  }
+  try {
+    await stage(p.id, 'transcribe', async (progress) => {
+      for (let i = 0; i < chunks.length; i++) {
+        const c = chunks[i]!
+        const t = readTranscript(p)
+        if (t.to < c.e - 0.5) {
+          const from = Math.max(c.s, t.to)
+          const words = await whisperLane.run(() => whisperRange(p, `ep_${i}`, from, c.e))
+          writeTranscript(p, { to: c.e, words: mergeWords(t.words, words, 0, from) })
+        }
+        progress((i + 1) / chunks.length)
+        segment(i)
+      }
+    })
+  } finally {
+    await Promise.all(jobs)
+  }
+  if (segError) {
+    setStage(p.id, 'candidates', { status: 'error', message: segError })
+    throw new Error(segError)
+  }
+  setStage(p.id, 'candidates', { status: 'done', progress: 1 })
+  const total = clipsRepo.byProject(p.id).length
+  if (total === 0) toast('info', `${p.name}: não achei conversas que funcionem sozinhas. Dá pra adicionar cortes manuais.`)
+  else if (found > 0) toast('success', `${p.name}: ${total} conversas encontradas.`)
 }
 
 /** Junta palavras novas sem duplicar o trecho que já estava transcrito. */
@@ -323,7 +528,7 @@ export async function transcribeClip(clipId: string, opts: { priority?: boolean 
       c.wordsFrom = from
       c.wordsTo = to
       // legenda ganha os trechos novos sem perder edições
-      if (c.cues) c.cues = mergeCuesInCuts(c.cues, words, cutsOf(c), getSettings().dictionary)
+      if (c.cues) c.cues = mergeCuesInCuts(c.cues, words, cutsOf(c), projectSettings(c.projectId).dictionary)
     })
   }, opts)
 }
@@ -332,17 +537,21 @@ export async function transcribeClip(clipId: string, opts: { priority?: boolean 
 export async function rankClip(clipId: string): Promise<Clip | null> {
   const clip = clipsRepo.get(clipId)
   if (!clip?.words) return clip
+  const project = projectsRepo.get(clip.projectId)
+  const profile = getProfile(project?.profileId ?? '')
   return llmLane.run(async () => {
     const client = await llmClient()
     const { system, user } = rankPrompt({
-      style: hookStyleBlock(projectsRepo.get(clip.projectId)?.game ?? null),
+      channel: channelIntro(profile),
+      kind: project?.kind,
+      style: hookStyleBlock(profile.id, project?.game ?? null),
       words: clip.words!,
       winStart: clip.winStart,
       winEnd: clip.winEnd,
       peak: clip.peakSec,
       tags: clip.tags,
       signalScore: clip.signalScore,
-      performanceHint: performanceHint()
+      performanceHint: performanceHint(profile.id)
     })
     const out = await client.chatJson<RankOutput>(system, user, RANK_SCHEMA)
     const insight = normalizeRank(out, clip.winStart, clip.winEnd, clip.peakSec, client.provider)
@@ -407,6 +616,8 @@ export async function makePreview(clipId: string, opts: { priority?: boolean } =
       c.previewEnd = end
     })
     if (old && old !== out) rmSync(old, { force: true })
+    // câmera seguindo o rosto: calcula em cima do preview novo (leve de decodificar)
+    if (saved?.layout === 'face') void ensureFaces(clipId).catch(() => undefined)
     return saved
   }, opts)
 }
@@ -536,21 +747,36 @@ async function analyzeProject(id: string): Promise<void> {
   const f = files(p)
   if (!stageDone(p, 'audio') || !existsSync(f.wav) || !existsSync(f.loud)) await extractAudio(p)
   p = projectsRepo.get(id)!
-  if (!stageDone(p, 'events') || (p.stages.events.status === 'done' && !existsSync(f.events))) await detectEvents(p)
+  let results: PromiseSettledResult<void>[]
+  if (p.kind === 'podcast') {
+    // conversas: transcrição do episódio inteiro + IA (os previews saem conforme os cortes aparecem)
+    const r = await Promise.allSettled([analyzePodcast(p)])
+    p = projectsRepo.get(id)!
+    results = [...r, ...(await Promise.allSettled([makePreviews(p, clipsRepo.byProject(id))]))]
+  } else {
+    if (!stageDone(p, 'events') || (p.stages.events.status === 'done' && !existsSync(f.events))) await detectEvents(p)
 
-  p = projectsRepo.get(id)!
-  const clips = await stage(id, 'candidates', async () => findCandidates(p!))
-  if (clips.length === 0) toast('info', `${p.name}: não achei momentos fortes. Dá pra adicionar cortes manuais.`)
-  else toast('success', `${p.name}: ${clips.length} momentos encontrados. A transcrição e a nota da IA vão chegando.`)
+    p = projectsRepo.get(id)!
+    const clips = await stage(id, 'candidates', async () => findCandidates(p!))
+    if (clips.length === 0) toast('info', `${p.name}: não achei momentos fortes. Dá pra adicionar cortes manuais.`)
+    else toast('success', `${p.name}: ${clips.length} momentos encontrados. A transcrição e a nota da IA vão chegando.`)
 
-  // Transcrição/ranking e previews andam juntos; um erro num não para o outro.
-  const results = await Promise.allSettled([transcribeAndRank(p, clips), makePreviews(p, clips)])
+    // Transcrição/ranking e previews andam juntos; um erro num não para o outro.
+    results = await Promise.allSettled([transcribeAndRank(p, clips), makePreviews(p, clips)])
+  }
 
   p = projectsRepo.get(id)!
   p.status = 'ready'
   const failed = results.find((r) => r.status === 'rejected') as PromiseRejectedResult | undefined
   p.error = failed ? errMsg(failed.reason) : null
   saveProject(p, { list: true })
+  for (const fn of doneListeners) {
+    try {
+      fn(id)
+    } catch {
+      // um ouvinte com erro não para a análise
+    }
+  }
 
   // Proxy da live inteira por último, em prioridade baixa e numa fila própria:
   // não segura nem a próxima live nem os previews pedidos na tela.

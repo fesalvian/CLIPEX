@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { STAGE_LABEL, STAGE_ORDER } from '@shared/defaults'
+import { LAYOUT_LABEL, layoutsFor, stageLabel, stageOrder } from '@shared/defaults'
 import { clipDuration, cutsOf, newSegmentAt, withCuts } from '@shared/cuts'
 import { fmtClock, fmtDur, fmtLong, fmtTotal } from '@shared/time'
 import type { CamSplit, Clip, ClipLayout, CropLayout, DetectedTag, Project, Watermark } from '@shared/types'
@@ -19,7 +19,7 @@ import { usePreviewPlayer, type Player } from '../lib/player'
 import { clipLabel, clipList, clipScore, clipSub, useStore, type LiveWave } from '../store'
 import { captionStyleFor, hookStyleFor, hookTextFor } from '@shared/text'
 
-type Filter = 'all' | 'laugh' | 'scream' | 'peak' | 'manual'
+type Filter = 'all' | 'laugh' | 'scream' | 'peak' | 'manual' | 'talk'
 
 const FILTERS: { key: Filter; label: string }[] = [
   { key: 'all', label: 'Todos' },
@@ -29,18 +29,25 @@ const FILTERS: { key: Filter; label: string }[] = [
   { key: 'manual', label: 'Manuais' }
 ]
 
+/** Podcast: os cortes são conversas (não tem risada/grito separados). */
+const PODCAST_FILTERS: { key: Filter; label: string }[] = [
+  { key: 'all', label: 'Todos' },
+  { key: 'talk', label: 'Conversas' },
+  { key: 'manual', label: 'Manuais' }
+]
+
 export const TAG_INFO: Record<DetectedTag, { label: string; color: string }> = {
   laugh: { label: 'Risada', color: '#C4B5FD' },
   scream: { label: 'Grito', color: '#FF9F45' },
   peak: { label: 'Pico de áudio', color: '#3FC8E8' },
-  manual: { label: 'Manual', color: '#F472B6' }
+  manual: { label: 'Manual', color: '#F472B6' },
+  talk: { label: 'Conversa', color: '#60A5FA' }
 }
 
-const LAYOUTS: { key: ClipLayout; label: string }[] = [
-  { key: 'both', label: 'Cam + jogo' },
-  { key: 'game', label: 'Só jogo' },
-  { key: 'cam', label: 'Só cam' }
-]
+/** Nome do layout no seletor (no gameplay, o recorte do jogo é "Só jogo"). */
+function layoutLabel(l: ClipLayout, gameplay: boolean): string {
+  return gameplay && l === 'game' ? 'Só jogo' : LAYOUT_LABEL[l]
+}
 const SPLITS: CamSplit[] = [30, 40, 50]
 /** tamanho da timeline de cada corte (s): dá pra afastar pra pegar outros trechos do momento */
 const TIMELINE_MIN = 20
@@ -56,8 +63,9 @@ export function projectSubtitle(p: Project | null): string {
 
 export function AnalysisBanner({ project }: { project: Project }) {
   if (project.status !== 'analyzing' && project.status !== 'queued') return null
-  const running = STAGE_ORDER.find((k) => project.stages[k].status === 'running')
-  const done = STAGE_ORDER.filter(
+  const order = stageOrder(project.kind)
+  const running = order.find((k) => project.stages[k].status === 'running')
+  const done = order.filter(
     (k) => k !== 'proxy' && (project.stages[k].status === 'done' || project.stages[k].status === 'skipped')
   ).length
   const st = running ? project.stages[running] : null
@@ -68,10 +76,10 @@ export function AnalysisBanner({ project }: { project: Project }) {
         <span style={{ fontSize: 13 }}>
           {project.status === 'queued'
             ? 'Na fila pra análise'
-            : `Analisando a live · ${running ? STAGE_LABEL[running] : 'preparando'}`}
+            : `Analisando ${project.kind === 'podcast' ? 'o episódio' : project.kind === 'wide' ? 'o vídeo' : 'a live'} · ${running ? stageLabel(project.kind, running) : 'preparando'}`}
           <span className="muted">
             {' '}
-            · etapa {Math.min(done + 1, STAGE_ORDER.length - 1)} de {STAGE_ORDER.length - 1}
+            · etapa {Math.min(done + 1, order.length - 1)} de {order.length - 1}
           </span>
         </span>
         <div className="progress">
@@ -153,7 +161,7 @@ function ClipRow({
           ))}
           <span style={{ flexGrow: 1 }} />
           <span className="mono" style={{ fontSize: 12, color: 'var(--muted)' }}>
-            na live {fmtClock(clip.peakSec)}
+            {clip.tags.includes('talk') ? `no vídeo ${fmtClock(clip.cutIn)}` : `na live ${fmtClock(clip.peakSec)}`}
           </span>
           {clip.stage === 'error' ? (
             <span className="score warn" title={clip.stageError ?? ''}>
@@ -267,6 +275,9 @@ export function Clipar() {
   const selected = (selId ? clipsMap[selId] : null) ?? visible[0] ?? null
   const approved = clips.filter((c) => c.approved)
   const totalSec = approved.reduce((n, c) => n + clipDuration(c), 0)
+  const kind = project?.kind ?? 'gameplay'
+  const filters = kind === 'podcast' ? PODCAST_FILTERS : FILTERS
+  const layouts = layoutsFor(kind)
 
   const player = usePreviewPlayer(selected, project?.proxyPath ?? null)
   const duration = project?.source?.durationSec ?? 0
@@ -443,7 +454,7 @@ export function Clipar() {
               </span>
             </div>
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-              {FILTERS.map((f) => (
+              {filters.map((f) => (
                 <button key={f.key} className="filter-btn" aria-pressed={filter === f.key} onClick={() => setFilter(f.key)}>
                   {f.label}
                 </button>
@@ -519,18 +530,22 @@ export function Clipar() {
                   className="seg"
                   role="group"
                   aria-label="Layout do corte"
-                  style={{ gridTemplateColumns: 'repeat(3, minmax(0, 1fr))' }}
+                  style={{ gridTemplateColumns: `repeat(${layouts.length}, minmax(0, 1fr))` }}
                 >
-                  {LAYOUTS.map((l) => (
-                    <button
-                      key={l.key}
-                      aria-pressed={selected.layout === l.key}
-                      onClick={() => void patchClip(selected.id, { layout: l.key })}
-                    >
-                      {l.label}
+                  {layouts.map((l) => (
+                    <button key={l} aria-pressed={selected.layout === l} onClick={() => void patchClip(selected.id, { layout: l })}>
+                      {layoutLabel(l, kind === 'gameplay')}
                     </button>
                   ))}
                 </div>
+                {selected.layout === 'face' && (
+                  <span className="hint">
+                    {selected.faces
+                      ? `A câmera segue o rosto de quem fala (${selected.faces.shots.length} ${selected.faces.shots.length === 1 ? 'plano' : 'planos'} neste trecho).`
+                      : 'Procurando os rostos no trecho…'}
+                  </span>
+                )}
+                {selected.layout === 'fit' && <span className="hint">O quadro inteiro no meio, com o mesmo vídeo desfocado em volta.</span>}
               </div>
 
               {selected.layout === 'both' && (
@@ -553,6 +568,7 @@ export function Clipar() {
             </>
           )}
 
+          {selected?.layout !== 'fit' && selected?.layout !== 'face' && (
           <div className="panel" style={{ gap: 10 }}>
             <CropEditor
               project={project}
@@ -590,6 +606,7 @@ export function Clipar() {
               Salvar como preset do meu layout de live
             </label>
           </div>
+          )}
 
           {selected && <TextsPanel clip={selected} settings={settings} allClips={clips} />}
 

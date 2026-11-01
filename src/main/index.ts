@@ -9,7 +9,9 @@ import { registerIpc } from './ipc'
 import { handleMediaProtocol, registerMediaScheme } from './media'
 import { isDev, resourcesDir } from './paths'
 import { activeProcessCount, killAllProcesses } from './proc'
-import { analysisBusy, resumePending } from './pipeline'
+import { analysisBusy, onAnalysisDone, resumePending } from './pipeline'
+import { resumeAutopilot, runAutopilot } from './autopilot'
+import { sourcesBusy, startSources, stopSources } from './sources'
 import { resumeClipJobs } from './prepare'
 import { markProjectStale } from './render/queue'
 import { consumeWatermarkMigration, getSettings } from './settings'
@@ -32,7 +34,7 @@ let idleTimer: NodeJS.Timeout | null = null
 
 /** Render, análise ou envio em andamento: reiniciar o app agora interromperia. */
 function busy(): boolean {
-  return activeProcessCount() > 0 || analysisBusy() || postingNow()
+  return activeProcessCount() > 0 || analysisBusy() || postingNow() || sourcesBusy()
 }
 
 /** Janela fechada: quando nada estiver rodando, reinicia no modo econômico (libera a memória da GPU). */
@@ -143,10 +145,14 @@ if (!app.requestSingleInstanceLock()) {
     applyDevSettings()
     startWatcher()
     startScheduler()
+    // modo automático: canal vigiado baixa sozinho; análise pronta de vídeo automático vai pra fila
+    onAnalysisDone((id) => void runAutopilot(id))
+    startSources()
     // marca d'água antiga trocada pela logo presa à legenda: renders prontos ficam velhos
     if (consumeWatermarkMigration()) for (const p of projectsRepo.all()) markProjectStale(p.id)
     resumePending()
     resumeClipJobs()
+    resumeAutopilot()
     if (mainWindow) void runDevTour(mainWindow)
     process.on('uncaughtException', (e) => toast('error', `Erro interno: ${e.message}`))
   })
@@ -155,6 +161,7 @@ if (!app.requestSingleInstanceLock()) {
     quitting = true
     stopWatcher()
     stopScheduler()
+    stopSources()
     killAllProcesses()
     closeDb()
   })

@@ -1,7 +1,9 @@
 import type { PlatformRules } from './platformRules'
 import type {
+  AutoSource,
   Captions,
   Clip,
+  ClipKind,
   ClipRender,
   ComponentKey,
   ComponentStatus,
@@ -10,10 +12,12 @@ import type {
   LlmProvider,
   Network,
   Post,
+  Profile,
   Project,
   ProjectSummary,
   ScheduleSuggestion,
   Settings,
+  SourceStatus,
   StyleExample,
   SubtitleCue,
   VodDownload,
@@ -118,15 +122,39 @@ export interface ExportResult {
   error: string | null
 }
 
+export interface NewProfileInput {
+  name: string
+  kind: ClipKind
+  subject: string
+}
+
+export type ProfilePatch = Partial<Pick<Profile, 'name' | 'subject' | 'color' | 'autoPost'>>
+
 /** Chamadas renderer → main (ipcRenderer.invoke). */
 export interface IpcApi {
   'app:info': () => { version: string; userData: string; isDev: boolean }
   'app:platform-rules': () => PlatformRules
 
+  'profiles:list': () => Profile[]
+  'profiles:active': () => string
+  /** troca o perfil ativo (as telas passam a mostrar e editar esse perfil) */
+  'profiles:select': (id: string) => Profile
+  'profiles:create': (input: NewProfileInput) => Profile
+  'profiles:update': (id: string, patch: ProfilePatch) => Profile
+  /** exclui o perfil e os projetos dele (os vídeos brutos ficam) */
+  'profiles:delete': (id: string) => Profile[]
+
+  /** canal vigiado do perfil ativo: liga, muda ou desliga (null) */
+  'sources:set': (patch: Partial<AutoSource> | null) => AutoSource | null
+  'sources:check': () => void
+  'sources:status': () => SourceStatus
+
   'projects:list': () => ProjectSummary[]
   'projects:get': (id: string) => Project | null
   'projects:import': (path: string | null) => Project | null
   'projects:import-twitch': (url: string) => void
+  /** baixa um vídeo do YouTube ou da Twitch pelo link (perfil ativo) */
+  'projects:import-url': (url: string) => void
   'projects:delete': (id: string) => void
   'projects:reanalyze': (id: string) => void
   'projects:retry': (id: string) => void
@@ -143,6 +171,8 @@ export interface IpcApi {
   'clips:prepare': (clipIds: string[]) => void
   'clips:apply-dictionary': (clipId: string) => Clip
   'clips:reset-cues': (clipId: string) => Clip
+  /** calcula a câmera seguindo quem fala (layout 'face') */
+  'clips:ensure-faces': (clipId: string) => Clip
 
   'llm:hooks': (clipId: string, provider: LlmProvider) => string[]
   'llm:captions': (clipId: string, provider: LlmProvider) => Captions
@@ -173,6 +203,8 @@ export interface IpcApi {
   'settings:update': (patch: Partial<Settings>) => Settings
   'settings:set-openai-key': (key: string) => void
   'settings:has-openai-key': () => boolean
+  /** troca o token do Instagram no .env e já testa */
+  'settings:set-instagram-token': (token: string) => { ok: boolean; error: string | null }
 
   'watermark:pick': () => Watermark | null
   'dialog:pick-folder': (initial: string | null) => string | null
@@ -205,6 +237,8 @@ export interface IpcEvents {
   'watcher:changed': WatcherStatus
   'post:updated': Post
   'vod:progress': VodDownload
+  'profiles:changed': Profile[]
+  'source:status': SourceStatus
   'toast': { kind: 'info' | 'error' | 'success'; text: string }
 }
 

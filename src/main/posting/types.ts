@@ -13,6 +13,8 @@ export interface PublishInput {
   hashtags: string[]
   /** agendamento nativo (só YouTube); null = publicar agora */
   publishAt: string | null
+  /** categoria do vídeo no YouTube (20 = jogos, 24 = entretenimento) */
+  categoryId?: string
 }
 
 export interface PublishResult {
@@ -26,11 +28,15 @@ export interface PublishResult {
   note?: string
 }
 
+/** A cota diária da API do YouTube acabou: o post espera em vez de falhar. */
+export class QuotaError extends Error {}
+
+/** Cliente de uma rede. Cada perfil tem a própria conta (tokens separados). */
 export interface NetworkClient {
   readonly network: Network
-  connected(): Promise<{ connected: boolean; account: string | null }>
-  connect(): Promise<void>
-  publish(input: PublishInput, onProgress?: (p: number) => void): Promise<PublishResult>
+  connected(profileId: string): Promise<{ connected: boolean; account: string | null }>
+  connect(profileId: string): Promise<void>
+  publish(profileId: string, input: PublishInput, onProgress?: (p: number) => void): Promise<PublishResult>
   /** views por id remoto; redes sem API de métricas devolvem mapa vazio */
-  metrics(remoteIds: string[]): Promise<Map<string, RemoteStats>>
+  metrics(profileId: string, remoteIds: string[]): Promise<Map<string, RemoteStats>>
 }

@@ -2,8 +2,9 @@
 // saem listas de argumentos. Nada de string solta concatenada no meio do código.
 
 import { OUT_H, OUT_W } from '@shared/defaults'
-import { coverCrop, layoutPanes, zoomCrop, type PixelRect } from '@shared/geometry'
-import type { CamSplit, ClipLayout, CropLayout, Cut } from '@shared/types'
+import { faceCropExpr } from '@shared/faces'
+import { coverCrop, fitBox, layoutPanes, zoomCrop, type PixelRect } from '@shared/geometry'
+import type { CamSplit, ClipLayout, CropLayout, Cut, FaceTrack } from '@shared/types'
 
 export type VideoEncoder = 'nvenc' | 'amf' | 'x264'
 
@@ -172,6 +173,22 @@ export function bitrateToFit(maxBytes: number, seconds: number, audioKbps = 192)
   return Math.max(800, Math.floor(totalKbps - audioKbps))
 }
 
+/** Quadros pequenos (320×240, RGB cru no stdout) pra detecção de rosto. */
+export function faceFramesArgs(src: string, start: number, duration: number, fps: number): string[] {
+  return [
+    ...BASE,
+    '-loglevel', 'error',
+    '-ss', num(Math.max(0, start)),
+    '-t', num(duration),
+    '-i', src,
+    '-map', '0:v:0',
+    '-vf', `fps=${fps},scale=320:240:flags=fast_bilinear`,
+    '-pix_fmt', 'rgb24',
+    '-f', 'rawvideo',
+    'pipe:1'
+  ]
+}
+
 export function frameArgs(src: string, at: number, out: string): string[] {
   return [...BASE, '-ss', num(Math.max(0, at)), '-i', src, '-frames:v', '1', '-vf', 'scale=1280:-2', '-q:v', '3', out]
 }
@@ -210,6 +227,8 @@ export interface RenderConfig {
   crop: CropLayout
   /** punch-in: tempo relativo ao início do corte */
   zoom: { at: number; duration: number; factor: number } | null
+  /** layout 'face': planos da câmera seguindo quem fala (tempo da fonte) */
+  faces?: FaceTrack | null
   /** arquivo .ass relativo ao cwd do ffmpeg (evita escapar caminho do Windows no filtro) */
   subtitles: string | null
   fontsDir: string | null
@@ -247,7 +266,54 @@ function cropFilter(c: PixelRect): string {
   return `crop=${c.w}:${c.h}:${c.x}:${c.y}`
 }
 
+/**
+ * Vídeo inteiro (layout 'fit'): o quadro 16:9 no meio, largura toda, e em volta o mesmo vídeo
+ * ampliado e desfocado (desfoque feito numa versão pequena: bem mais rápido).
+ */
+function fitGraph(parts: string[], src: string, c: RenderConfig): string {
+  const box = fitBox(c.srcW, c.srcH)
+  parts.push(`${src}split=${c.zoom ? 3 : 2}[fb][ff]${c.zoom ? '[fz]' : ''}`)
+  parts.push(
+    `[fb]scale=270:480:force_original_aspect_ratio=increase:flags=fast_bilinear,crop=270:480,boxblur=12:2,eq=brightness=-0.12,scale=${OUT_W}:${OUT_H}:flags=bilinear,setsar=1[bg]`
+  )
+  parts.push(`[ff]scale=${box.w}:${box.h}:flags=lanczos,setsar=1[fg]`)
+  let fg = 'fg'
+  if (c.zoom) {
+    const z = zoomCrop({ x: 0, y: 0, w: c.srcW, h: c.srcH }, c.zoom.factor)
+    const t0 = num(Math.max(0, c.zoom.at))
+    const t1 = num(Math.max(0, c.zoom.at + c.zoom.duration))
+    parts.push(`[fz]${cropFilter(z)},scale=${box.w}:${box.h}:flags=lanczos,setsar=1[fgz]`)
+    parts.push(`[fg][fgz]overlay=0:0:enable='between(t,${t0},${t1})'[fgo]`)
+    fg = 'fgo'
+  }
+  parts.push(`[bg][${fg}]overlay=${box.x}:${box.y}[stk]`)
+  return 'stk'
+}
+
+/** Seguir quem fala (layout 'face'): recorte 9:16 da altura toda, com o x mudando a cada plano. */
+function faceGraph(parts: string[], src: string, c: RenderConfig): string {
+  const cropW = Math.min(c.srcW, Math.round((c.srcH * 9) / 16 / 2) * 2)
+  const cuts = c.keep && c.keep.length ? c.keep.map((k) => ({ s: k.s + c.cutIn, e: k.e + c.cutIn })) : [{ s: c.cutIn, e: c.cutOut }]
+  const x = faceCropExpr(c.faces ?? null, cuts, c.srcW, cropW)
+  const scale = `scale=${OUT_W}:${OUT_H}:flags=lanczos,setsar=1`
+  if (!c.zoom) {
+    parts.push(`${src}crop=${cropW}:${c.srcH}:x='${x}':y=0,${scale}[stk]`)
+    return 'stk'
+  }
+  const zw = Math.round(cropW / c.zoom.factor / 2) * 2
+  const zh = Math.round(c.srcH / c.zoom.factor / 2) * 2
+  const zx = faceCropExpr(c.faces ?? null, cuts, c.srcW, cropW, Math.round((cropW - zw) / 2))
+  const t0 = num(Math.max(0, c.zoom.at))
+  const t1 = num(Math.max(0, c.zoom.at + c.zoom.duration))
+  parts.push(`${src}split=2[fa][fz]`)
+  parts.push(`[fa]crop=${cropW}:${c.srcH}:x='${x}':y=0,${scale}[fan]`)
+  parts.push(`[fz]crop=${zw}:${zh}:x='${zx}':y=${Math.round((c.srcH - zh) / 2)},${scale}[fzn]`)
+  parts.push(`[fan][fzn]overlay=0:0:enable='between(t,${t0},${t1})'[stk]`)
+  return 'stk'
+}
+
 export function renderFilterGraph(c: RenderConfig): { graph: string; videoOut: string; audioOut: string } {
+  if (c.layout === 'fit' || c.layout === 'face') return wholeFrameGraph(c)
   const panes = layoutPanes(c.layout, c.camSplit, OUT_W, OUT_H)
   const zoomKind: 'cam' | 'game' | null = c.zoom ? (panes.some((p) => p.kind === 'cam') ? 'cam' : 'game') : null
   const parts: string[] = []
@@ -291,6 +357,30 @@ export function renderFilterGraph(c: RenderConfig): { graph: string; videoOut: s
     cur = paneLabels[0]!
   }
 
+  return finishGraph(parts, cur, c, keep)
+}
+
+/** Layouts que usam o quadro todo da fonte (vídeo inteiro, seguir quem fala). */
+function wholeFrameGraph(c: RenderConfig): { graph: string; videoOut: string; audioOut: string } {
+  const parts: string[] = []
+  const keep = c.keep && c.keep.length > 1 ? keepFilters(c.keep) : null
+  let src = '[0:v]'
+  if (keep) {
+    parts.push(`[0:v]${keep.video}[vk]`)
+    src = '[vk]'
+  }
+  const cur = c.layout === 'fit' ? fitGraph(parts, src, c) : faceGraph(parts, src, c)
+  return finishGraph(parts, cur, c, keep)
+}
+
+/** Depois do vídeo montado: 60 fps no máximo, logo, legenda e o áudio. */
+function finishGraph(
+  parts: string[],
+  start: string,
+  c: RenderConfig,
+  keep: { video: string; audio: string } | null
+): { graph: string; videoOut: string; audioOut: string } {
+  let cur = start
   if (c.srcFps > 60.5) {
     parts.push(`[${cur}]fps=60[fps]`)
     cur = 'fps'

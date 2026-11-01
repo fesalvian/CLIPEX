@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react'
 import { NETWORKS, type Network, type Settings } from '@shared/types'
 import { call, errorText } from '../api'
+import { DEFAULT_PROFILE_ID } from '@shared/defaults'
 import { AppHeader } from '../components/AppHeader'
 import { Icon } from '../components/Icon'
+import { AutoPostPanel, ProfileInfoPanel, SourcePanel } from '../components/ProfilePanels'
 import { StylePanel } from '../components/StylePanel'
 import { TextDefaultsEditor } from '../components/TextDefaultsEditor'
-import { useStore } from '../store'
+import { useActiveProfile, useStore } from '../store'
 
 const NET_LABEL: Record<Network, string> = { instagram: 'Instagram Reels', tiktok: 'TikTok', youtube: 'YouTube Shorts' }
 const NET_HELP: Record<Network, string> = {
@@ -28,6 +30,9 @@ export function SettingsScreen() {
   const [models, setModels] = useState<{ openai: string[]; local: string[] }>({ openai: [], local: [] })
   const [conns, setConns] = useState<Record<Network, { connected: boolean; account: string | null }> | null>(null)
   const [connecting, setConnecting] = useState<Network | null>(null)
+  const [igToken, setIgToken] = useState('')
+  const profile = useActiveProfile()
+  const isMain = profile?.id === DEFAULT_PROFILE_ID
 
   const loadModels = (): void => {
     void call('llm:models', 'openai').then(
@@ -42,9 +47,13 @@ export function SettingsScreen() {
 
   useEffect(() => {
     void call('settings:has-openai-key').then(setHasKey)
-    void call('posts:connections').then(setConns)
     loadModels()
   }, [])
+  // contas são de cada perfil
+  useEffect(() => {
+    setConns(null)
+    void call('posts:connections').then(setConns)
+  }, [profile?.id])
 
   if (!settings) return null
   const set = (patch: Partial<Settings>): void => void update(patch)
@@ -71,7 +80,23 @@ export function SettingsScreen() {
     }
   }
 
-  const openaiOptions = models.openai.includes(settings.openaiModel) ? models.openai : [settings.openaiModel, ...models.openai]
+  const saveIgToken = async (): Promise<void> => {
+    setConnecting('instagram')
+    try {
+      const r = await call('settings:set-instagram-token', igToken.trim())
+      if (r.ok) {
+        setIgToken('')
+        toast('success', 'Token do Instagram salvo. A fila do Instagram continua de onde parou.')
+      } else toast('error', r.error ?? 'O Instagram não aceitou esse token.')
+      setConns(await call('posts:connections'))
+    } catch (e) {
+      toast('error', errorText(e))
+    } finally {
+      setConnecting(null)
+    }
+  }
+
+  const openaiOptions =models.openai.includes(settings.openaiModel) ? models.openai : [settings.openaiModel, ...models.openai]
   const localOptions =
     settings.ollamaModel && !models.local.includes(settings.ollamaModel) ? [settings.ollamaModel, ...models.local] : models.local
 
@@ -79,7 +104,7 @@ export function SettingsScreen() {
     <>
       <AppHeader
         title="Configurações"
-        subtitle="Clipador"
+        subtitle={profile ? `perfil ${profile.name}` : 'Clipador'}
         actions={
           <button className="btn" onClick={() => go({ name: 'home' })}>
             <Icon name="arrowLeft" /> Voltar
@@ -87,6 +112,17 @@ export function SettingsScreen() {
         }
       />
       <main className="screen settings">
+        {profile && <ProfileInfoPanel profile={profile} />}
+        {profile && (
+          <div className="settings-cols">
+            <div className="col">
+              <SourcePanel profile={profile} />
+            </div>
+            <div className="col">
+              <AutoPostPanel profile={profile} />
+            </div>
+          </div>
+        )}
         <TextDefaultsEditor />
         <StylePanel />
         <div className="settings-cols">
@@ -126,13 +162,14 @@ export function SettingsScreen() {
                 Abrir com o Windows, direto na bandeja (pros agendamentos de Instagram e TikTok saírem na hora)
               </label>
               <label className="field" style={{ maxWidth: 420 }}>
-                Apagar o arquivo bruto (só da pasta vigiada) depois que todos os cortes aprovados forem postados
+                Apagar o arquivo bruto (da pasta vigiada ou baixado pelo app) depois que todos os cortes aprovados forem postados
                 <select
                   className="select"
                   value={settings.deleteRawAfterDays ?? 0}
                   onChange={(e) => set({ deleteRawAfterDays: Number(e.target.value) || null })}
                 >
                   <option value={0}>Nunca</option>
+                  <option value={-1}>Logo que os cortes ficam prontos (postagem automática)</option>
                   <option value={3}>3 dias depois</option>
                   <option value={7}>7 dias depois</option>
                   <option value={14}>14 dias depois</option>
@@ -142,7 +179,9 @@ export function SettingsScreen() {
             </section>
 
             <section className="panel">
-              <span className="panel-title">Inteligência artificial</span>
+              <span className="panel-title">
+                Inteligência artificial <span className="chip">todos os perfis</span>
+              </span>
               <span className="hint">Usada no ranking dos momentos, nos ganchos e nas legendas por rede.</span>
               <div
                 className="seg"
@@ -208,7 +247,9 @@ export function SettingsScreen() {
           </div>
           <div className="col">
             <section className="panel">
-              <span className="panel-title">Componentes de IA</span>
+              <span className="panel-title">
+                Componentes de IA <span className="chip">todos os perfis</span>
+              </span>
               <span className="hint">Rodam no seu PC. O Whisper usa a placa de vídeo quando tem NVIDIA.</span>
               {components.map((c) => (
                 <div key={c.key} className="component-row">
@@ -267,7 +308,7 @@ export function SettingsScreen() {
                   </select>
                 </label>
                 <label className="field">
-                  Encoder de vídeo
+                  Encoder de vídeo (todos os perfis)
                   <select
                     className="select"
                     value={settings.encoder}
@@ -311,7 +352,10 @@ export function SettingsScreen() {
             </section>
 
             <section className="panel">
-              <span className="panel-title">Contas</span>
+              <span className="panel-title">Contas · {profile?.name}</span>
+              <span className="hint">
+                Cada perfil posta nas próprias contas. Ao conectar, entre com a conta do canal deste perfil.
+              </span>
               {NETWORKS.map((n) => (
                 <div key={n} className="component-row" style={{ alignItems: 'flex-start' }}>
                   <span className="stage-icon" style={{ marginTop: 3 }}>
@@ -323,10 +367,37 @@ export function SettingsScreen() {
                   </span>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flexGrow: 1 }}>
                     <span style={{ fontWeight: 600 }}>
-                      {NET_LABEL[n]} · <span className="mono">{settings.accounts[n]}</span>
+                      {NET_LABEL[n]}
                       {conns?.[n]?.account && <span className="muted"> · conectado como {conns[n].account}</span>}
                     </span>
-                    <span className="hint">{NET_HELP[n]}</span>
+                    <input
+                      className="input mono"
+                      style={{ maxWidth: 260 }}
+                      aria-label={`@ no ${NET_LABEL[n]}`}
+                      placeholder="@ da conta (vai na legenda e no .txt)"
+                      value={settings.accounts[n]}
+                      onChange={(e) => set({ accounts: { ...settings.accounts, [n]: e.target.value } })}
+                    />
+                    <span className="hint">
+                      {n === 'instagram' && !isMain
+                        ? 'Cole o token do login do Instagram (começa com IG) da conta deste perfil. O app lê a conta pelo token e renova ele sozinho. O vídeo sobe pelo Supabase do .env.'
+                        : NET_HELP[n]}
+                    </span>
+                    {n === 'instagram' && (
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        <input
+                          className="input mono"
+                          type="password"
+                          aria-label="Token novo do Instagram"
+                          placeholder="Token novo (IG… ou EAA…)"
+                          value={igToken}
+                          onChange={(e) => setIgToken(e.target.value)}
+                        />
+                        <button className="btn" disabled={!igToken.trim() || connecting !== null} onClick={() => void saveIgToken()}>
+                          Salvar token
+                        </button>
+                      </div>
+                    )}
                   </div>
                   <button className="btn sm" disabled={connecting !== null} onClick={() => void connect(n)}>
                     {connecting === n && <span className="spinner" />}
@@ -334,6 +405,20 @@ export function SettingsScreen() {
                   </button>
                 </div>
               ))}
+              <label className="field" style={{ maxWidth: 420 }}>
+                Uploads por dia no YouTube (todos os perfis juntos)
+                <select className="select" value={settings.youtubeDailyUploads} onChange={(e) => set({ youtubeDailyUploads: Number(e.target.value) })}>
+                  {[3, 4, 5, 6, 10, 20, 50].map((v) => (
+                    <option key={v} value={v}>
+                      {v}
+                      {v === 6 ? ' (cota padrão da API)' : ''}
+                    </option>
+                  ))}
+                </select>
+                <span className="hint">
+                  A API do YouTube dá 10.000 unidades por dia e cada upload gasta 1.600. Os Shorts sobem na véspera e o resto espera o dia seguinte. Só aumente se o Google liberou mais cota pro seu projeto.
+                </span>
+              </label>
             </section>
           </div>
         </div>

@@ -31,6 +31,18 @@ Objetivo principal: ter os cortes prontos e postados o mais rápido possível de
 
 ---
 
+## Perfis (canais de cortes)
+
+Como os perfis da Netflix: ao abrir (com mais de um perfil) o app pergunta qual canal vai clipar. Cada perfil tem contas das redes, logo, textos, jeito de escrever, dicionário, pasta vigiada, canal vigiado e fila de postagem próprios. IA, Whisper, encoder e a cota diária do YouTube valem pra todos.
+
+- **Tipo de clipe** (escolhido ao criar o perfil):
+  - **Gameplay:** o fluxo de sempre (risada, grito e pico de áudio; cam + jogo). O perfil `fesalvian` (id `fesalvian`) é o do Felipe e existe desde antes dos perfis; os dados antigos são dele.
+  - **Podcast:** transcreve o episódio inteiro em pedaços de 10 min e a IA acha **conversas completas** (começo, meio e fim), encaixadas no início e no fim das frases. Layout padrão: **seguir quem fala** (detecção de rosto UltraFace + quem mexe a boca, em planos parados com corte seco).
+  - **Clipe em 16:9:** o quadro inteiro no meio do 9:16 com o fundo desfocado (layout "vídeo inteiro").
+- **Download automático:** o perfil aponta um canal (YouTube ou Twitch); o app olha o canal com o yt-dlp, ignora o que já existia, espera live terminar e baixa cada vídeo novo.
+- **Postagem automática (exceção à regra de confirmação):** ligada no perfil, com confirmação na hora de ligar. Vídeo que chega sozinho (canal ou pasta vigiada) tem os melhores cortes escolhidos (nota mínima, duração máxima, termos proibidos), preparados, renderizados e agendados N por dia sem revisão. Vídeo novo passa na frente na fila. Freio: "Pausar postagens" do perfil segura tudo.
+- **Limites respeitados:** YouTube sobe na véspera e no máximo `youtubeDailyUploads` por dia (cota da API, todos os perfis juntos; acabou a cota, espera zerar); TikTok até 5 rascunhos por dia por conta; Reels até 90 s.
+
 ## Entrada: gravação local do OBS (principal)
 
 O usuário vai gravar localmente no OBS em **MKV multifaixa** (guia de configuração: https://claude.ai/code/artifact/9bffb54e-39c4-4bbd-ae1d-0e61aefda0b2).
@@ -152,4 +164,4 @@ Ficam num arquivo de configuração (`platform-rules`), pra atualizar sem mexer 
 - Processamento pesado (ffmpeg, Whisper, classificador) em processos ou workers separados, com progresso enviado pra UI. Nunca travar a UI.
 - Todo comando ffmpeg montado por funções testáveis (entrada: config do corte; saída: argumentos), não por strings soltas.
 - Textos da interface em português brasileiro.
-- Antes de qualquer coisa que poste numa rede social, mostrar o que vai ser postado e pedir confirmação.
+- Antes de qualquer coisa que poste numa rede social, mostrar o que vai ser postado e pedir confirmação. Exceção: perfis com a **postagem automática** ligada (o usuário liga de propósito, com aviso, e tem nota mínima, termos proibidos e pausa como freio).

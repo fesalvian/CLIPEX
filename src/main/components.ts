@@ -17,6 +17,9 @@ const pexec = promisify(execFile)
 const WHISPER_REPO = 'ggml-org/whisper.cpp'
 const MODEL_BASE = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main'
 const YAMNET_URL = 'https://huggingface.co/andrelgomes/yamnet-onnx/resolve/main/yamnet.onnx'
+/** UltraFace RFB-320 (ONNX Model Zoo, 1,2 MB): detecção de rosto pra câmera seguir quem fala. */
+const FACES_URL = 'https://github.com/onnx/models/raw/main/validated/vision/body_analysis/ultraface/models/version-RFB-320.onnx'
+const FACES_FILE = 'face-rfb-320.onnx'
 
 function firstExisting(paths: string[]): string | null {
   for (const p of paths) if (p && existsSync(p)) return p
@@ -87,6 +90,10 @@ export function yamnetPath(): string | null {
   return firstExisting([join(componentsDir(), 'models', 'yamnet.onnx'), isDev ? join(vendorDir(), 'models', 'yamnet.onnx') : ''])
 }
 
+export function facesModelPath(): string | null {
+  return firstExisting([join(componentsDir(), 'models', FACES_FILE), isDev ? join(vendorDir(), 'models', FACES_FILE) : ''])
+}
+
 export async function hasNvidiaGpu(): Promise<boolean> {
   try {
     await pexec('nvidia-smi', ['-L'], { windowsHide: true, timeout: 5000 })
@@ -149,7 +156,8 @@ export function componentStatus(): ComponentStatus[] {
     item('whisper', 'Whisper (transcrição)', w, w?.includes('vendor') ? 'whisper.cpp (dev)' : 'whisper.cpp'),
     item('whisperModel', 'Modelo do Whisper', m, `${getSettings().whisperModel} · ${sizeLabel(m)}`),
     item('yamnet', 'Detector de risada e grito', y, `YAMNet · ${sizeLabel(y)}`),
-    item('ytdlp', 'Baixador de VOD da Twitch (plano B)', ytdlpPath(), 'yt-dlp')
+    item('faces', 'Detector de rosto (câmera seguindo quem fala)', facesModelPath(), 'UltraFace RFB-320'),
+    item('ytdlp', 'Baixador de vídeos (Twitch e YouTube)', ytdlpPath(), 'yt-dlp')
   ]
 }
 
@@ -224,6 +232,8 @@ export async function downloadComponent(key: ComponentKey): Promise<void> {
       await download(`${MODEL_BASE}/${name}`, join(models, name), key)
     } else if (key === 'yamnet') {
       await download(YAMNET_URL, join(models, 'yamnet.onnx'), key)
+    } else if (key === 'faces') {
+      await download(FACES_URL, join(models, FACES_FILE), key)
     } else if (key === 'ytdlp') {
       await download(YTDLP_URL, join(componentsDir(), 'yt-dlp.exe'), key)
     } else {

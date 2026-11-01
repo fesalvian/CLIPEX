@@ -12,8 +12,10 @@ import { randomUUID } from 'node:crypto'
 import { readFileSync, rmSync, statSync } from 'node:fs'
 import { promisify } from 'node:util'
 import { ffmpegPath, ffprobePath, videoEncoder } from '../components'
+import { DEFAULT_PROFILE_ID } from '@shared/defaults'
 import { secretsRepo } from '../db'
-import { env } from '../env'
+import { env, setEnv } from '../env'
+import { secretKey } from '../profiles'
 import { bitrateToFit, fitBitrateArgs, probeArgs } from '../ffmpeg/args'
 import { parseProbe } from '../ffmpeg/probe'
 import type { NetworkClient, PublishInput, PublishResult, RemoteStats } from './types'
@@ -23,12 +25,19 @@ const VERSION = 'v21.0'
 /** Plano gratuito do Supabase: 50 MB por arquivo. */
 const STORAGE_MAX_BYTES = 48 * 1024 * 1024
 const TOKEN_KEY = 'instagram-token'
+/** conta dos outros perfis (o do Felipe usa o .env) */
+const ACCOUNT_KEY = 'instagram-account'
 
 interface StoredToken {
   /** token do .env de onde este foi renovado (se o .env mudar, vale o novo) */
   from: string
   token: string
   refreshedAt: number
+}
+
+interface Account {
+  token: string
+  userId: string
 }
 
 export function hostForToken(token: string): string {
@@ -38,7 +47,13 @@ export function hostForToken(token: string): string {
   return /^IG/i.test(token) ? 'graph.instagram.com' : 'graph.facebook.com'
 }
 
-function envToken(): { token: string; userId: string } {
+/** Token e conta colados pelo usuário: .env no perfil do Felipe, cofre do app nos outros. */
+function baseAccount(profileId: string): Account {
+  if (profileId !== DEFAULT_PROFILE_ID) {
+    const a = secretsRepo.get<Account>(secretKey(ACCOUNT_KEY, profileId))
+    if (!a) throw new Error('Cole o token do Instagram deste perfil em Configurações › Contas.')
+    return a
+  }
   const token = env('INSTAGRAM_ACCESS_TOKEN')
   const userId = env('INSTAGRAM_USER_ID')
   if (!token || !userId) {
@@ -47,10 +62,10 @@ function envToken(): { token: string; userId: string } {
   return { token, userId }
 }
 
-/** Token em uso: o renovado pelo app (se veio do mesmo token do .env) ou o do .env. */
-function currentToken(): string {
-  const { token } = envToken()
-  const stored = secretsRepo.get<StoredToken>(TOKEN_KEY)
+/** Token em uso: o renovado pelo app (se veio do mesmo token colado) ou o colado. */
+function currentToken(profileId: string): string {
+  const { token } = baseAccount(profileId)
+  const stored = secretsRepo.get<StoredToken>(secretKey(TOKEN_KEY, profileId))
   return stored && stored.from === token ? stored.token : token
 }
 
@@ -58,34 +73,58 @@ function currentToken(): string {
  * Token do login do Instagram dura 60 dias; renovando antes disso ele não vence.
  * Renova no máximo uma vez por semana (a API só deixa renovar token com mais de 24 h).
  */
-export async function refreshInstagramToken(force = false): Promise<void> {
-  const { token: fromEnv } = envToken()
-  if (!/^IG/i.test(fromEnv)) return
-  const stored = secretsRepo.get<StoredToken>(TOKEN_KEY)
-  const base = stored && stored.from === fromEnv ? stored : { from: fromEnv, token: fromEnv, refreshedAt: 0 }
+export async function refreshInstagramToken(profileId: string, force = false): Promise<void> {
+  const { token: from } = baseAccount(profileId)
+  if (!/^IG/i.test(from)) return
+  const key = secretKey(TOKEN_KEY, profileId)
+  const stored = secretsRepo.get<StoredToken>(key)
+  const base = stored && stored.from === from ? stored : { from, token: from, refreshedAt: 0 }
   if (!force && Date.now() - base.refreshedAt < 7 * 24 * 3600 * 1000) return
   const res = await fetch(
     `https://graph.instagram.com/refresh_access_token?grant_type=ig_refresh_token&access_token=${encodeURIComponent(base.token)}`
   )
   const json = (await res.json().catch(() => ({}))) as { access_token?: string }
-  if (res.ok && json.access_token) secretsRepo.set(TOKEN_KEY, { from: fromEnv, token: json.access_token, refreshedAt: Date.now() })
+  if (res.ok && json.access_token) secretsRepo.set(key, { from, token: json.access_token, refreshedAt: Date.now() })
 }
 
-function cfg(): { token: string; userId: string; host: string } {
-  const { userId } = envToken()
-  const token = currentToken()
+function cfg(profileId: string): { token: string; userId: string; host: string } {
+  const { userId } = baseAccount(profileId)
+  const token = currentToken(profileId)
   return { token, userId, host: hostForToken(token) }
 }
 
-async function graph<T>(method: 'GET' | 'POST', path: string, params: Record<string, string> = {}): Promise<T> {
-  const { token, host } = cfg()
+/**
+ * Token novo colado na tela: no perfil do Felipe vai pro .env (como antes); nos outros, pro
+ * cofre do app, com o id da conta lido do próprio token (login do Instagram, "IG…").
+ */
+export async function setInstagramToken(profileId: string, token: string): Promise<void> {
+  const clean = token.replace(/\s/g, '')
+  if (profileId === DEFAULT_PROFILE_ID) {
+    setEnv('INSTAGRAM_ACCESS_TOKEN', clean)
+    return
+  }
+  if (!/^IG/i.test(clean)) throw new Error('Nos outros perfis use o token do login do Instagram (começa com IG).')
+  const res = await fetch(`https://graph.instagram.com/${VERSION}/me?fields=user_id,username&access_token=${encodeURIComponent(clean)}`)
+  const json = (await res.json().catch(() => ({}))) as { user_id?: string | number; id?: string; error?: { message?: string } }
+  const userId = String(json.user_id ?? json.id ?? '')
+  if (!res.ok || !userId) throw new Error(`Instagram não aceitou o token: ${json.error?.message ?? res.status}`)
+  secretsRepo.set(secretKey(ACCOUNT_KEY, profileId), { token: clean, userId } satisfies Account)
+}
+
+async function graph<T>(profileId: string, method: 'GET' | 'POST', path: string, params: Record<string, string> = {}): Promise<T> {
+  const { token, host } = cfg(profileId)
   const q = new URLSearchParams({ ...params, access_token: token })
   const url = `https://${host}/${VERSION}/${path}`
   const res = method === 'GET' ? await fetch(`${url}?${q}`) : await fetch(url, { method: 'POST', body: q })
-  const json = (await res.json().catch(() => ({}))) as T & { error?: { message?: string } }
+  const json = (await res.json().catch(() => ({}))) as T & { error?: { message?: string; code?: number } }
+  if (json.error?.code === 190) throw new Error(INVALID_TOKEN)
   if (!res.ok || json.error) throw new Error(`Instagram: ${json.error?.message ?? res.status}`)
   return json
 }
+
+/** Código 190: token vencido ou derrubado (troca de senha, sessão encerrada pela Meta). */
+const INVALID_TOKEN =
+  'Instagram: o token não vale mais (troca de senha ou sessão encerrada pela Meta). Gere um token novo no painel da Meta e cole em Configurações › Contas.'
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
@@ -93,9 +132,9 @@ export function instagramCaption(text: string, hashtags: string[]): string {
   return [text.trim(), hashtags.join(' ')].filter(Boolean).join('\n\n')
 }
 
-async function resumableContainer(input: PublishInput, caption: string, onProgress?: (p: number) => void): Promise<string> {
-  const { userId, token } = cfg()
-  const c = await graph<{ id: string; uri?: string }>('POST', `${userId}/media`, {
+async function resumableContainer(profileId: string, input: PublishInput, caption: string, onProgress?: (p: number) => void): Promise<string> {
+  const { userId, token } = cfg(profileId)
+  const c = await graph<{ id: string; uri?: string }>(profileId, 'POST', `${userId}/media`, {
     media_type: 'REELS',
     upload_type: 'resumable',
     caption,
@@ -142,7 +181,12 @@ async function fitForStorage(path: string): Promise<{ path: string; temp: boolea
   return { path: out, temp: true }
 }
 
-async function urlContainer(input: PublishInput, caption: string, onProgress?: (p: number) => void): Promise<{ id: string; cleanup: () => Promise<void> }> {
+async function urlContainer(
+  profileId: string,
+  input: PublishInput,
+  caption: string,
+  onProgress?: (p: number) => void
+): Promise<{ id: string; cleanup: () => Promise<void> }> {
   const { base, key, bucket } = storage()
   const file = await fitForStorage(input.videoPath)
   const object = `${randomUUID()}.mp4`
@@ -170,8 +214,13 @@ async function urlContainer(input: PublishInput, caption: string, onProgress?: (
     const signed = (await sign.json().catch(() => ({}))) as { signedURL?: string }
     if (!sign.ok || !signed.signedURL) throw new Error('Não consegui gerar o link temporário do vídeo no Supabase.')
     const videoUrl = `${base}/storage/v1${signed.signedURL}`
-    const { userId } = cfg()
-    const c = await graph<{ id: string }>('POST', `${userId}/media`, { media_type: 'REELS', video_url: videoUrl, caption, share_to_feed: 'true' })
+    const { userId } = cfg(profileId)
+    const c = await graph<{ id: string }>(profileId, 'POST', `${userId}/media`, {
+      media_type: 'REELS',
+      video_url: videoUrl,
+      caption,
+      share_to_feed: 'true'
+    })
     return { id: c.id, cleanup }
   } catch (e) {
     await cleanup()
@@ -182,41 +231,42 @@ async function urlContainer(input: PublishInput, caption: string, onProgress?: (
 export const instagram: NetworkClient = {
   network: 'instagram',
 
-  async connected() {
+  async connected(profileId) {
     try {
-      await refreshInstagramToken().catch(() => undefined)
-      const { userId } = cfg()
-      const r = await graph<{ username?: string }>('GET', userId, { fields: 'username' })
+      await refreshInstagramToken(profileId).catch(() => undefined)
+      const { userId } = cfg(profileId)
+      const r = await graph<{ username?: string }>(profileId, 'GET', userId, { fields: 'username' })
       return { connected: true, account: r.username ? `@${r.username}` : null }
     } catch {
       return { connected: false, account: null }
     }
   },
 
-  async connect() {
-    // token fica no .env; "conectar" confere se ele funciona (e se o storage está ok quando precisa)
-    const { userId } = cfg()
-    await graph('GET', userId, { fields: 'username' })
-    if (cfg().host === 'graph.instagram.com') storage()
-    await refreshInstagramToken(true).catch(() => undefined)
+  async connect(profileId) {
+    // token fica no .env (ou no cofre, nos outros perfis); "conectar" confere se ele funciona
+    // (e se o storage está ok quando precisa)
+    const { userId } = cfg(profileId)
+    await graph(profileId, 'GET', userId, { fields: 'username' })
+    if (cfg(profileId).host === 'graph.instagram.com') storage()
+    await refreshInstagramToken(profileId, true).catch(() => undefined)
   },
 
-  async publish(input, onProgress): Promise<PublishResult> {
-    await refreshInstagramToken().catch(() => undefined)
+  async publish(profileId, input, onProgress): Promise<PublishResult> {
+    await refreshInstagramToken(profileId).catch(() => undefined)
     const caption = instagramCaption(input.text, input.hashtags)
     let containerId: string
     let cleanup: (() => Promise<void>) | null = null
-    if (cfg().host === 'graph.instagram.com') {
+    if (cfg(profileId).host === 'graph.instagram.com') {
       // login do Instagram: só por link
-      const r = await urlContainer(input, caption, onProgress)
+      const r = await urlContainer(profileId, input, caption, onProgress)
       containerId = r.id
       cleanup = r.cleanup
     } else {
       try {
-        containerId = await resumableContainer(input, caption, onProgress)
+        containerId = await resumableContainer(profileId, input, caption, onProgress)
       } catch (e) {
         if (!env('SUPABASE_URL')) throw e
-        const r = await urlContainer(input, caption, onProgress)
+        const r = await urlContainer(profileId, input, caption, onProgress)
         containerId = r.id
         cleanup = r.cleanup
       }
@@ -224,15 +274,17 @@ export const instagram: NetworkClient = {
     try {
       // espera o Instagram baixar e processar o vídeo (só depois dá pra apagar do storage)
       for (let i = 0; i < 90; i++) {
-        const st = await graph<{ status_code?: string; status?: string }>('GET', containerId, { fields: 'status_code,status' })
+        const st = await graph<{ status_code?: string; status?: string }>(profileId, 'GET', containerId, { fields: 'status_code,status' })
         if (st.status_code === 'FINISHED') break
         if (st.status_code === 'ERROR' || st.status_code === 'EXPIRED') throw new Error(`Instagram não processou o vídeo: ${st.status ?? st.status_code}`)
         await sleep(5000)
       }
-      const { userId } = cfg()
-      const pub = await graph<{ id: string }>('POST', `${userId}/media_publish`, { creation_id: containerId })
+      const { userId } = cfg(profileId)
+      const pub = await graph<{ id: string }>(profileId, 'POST', `${userId}/media_publish`, { creation_id: containerId })
       onProgress?.(1)
-      const info = await graph<{ permalink?: string }>('GET', pub.id, { fields: 'permalink' }).catch(() => ({ permalink: undefined }))
+      const info = await graph<{ permalink?: string }>(profileId, 'GET', pub.id, { fields: 'permalink' }).catch(() => ({
+        permalink: undefined
+      }))
       return { remoteId: pub.id, url: info.permalink ?? null, draft: false, scheduledRemotely: false }
     } finally {
       // apaga do storage temporário depois de publicado (ou se deu erro)
@@ -240,12 +292,14 @@ export const instagram: NetworkClient = {
     }
   },
 
-  async metrics(ids) {
+  async metrics(profileId, ids) {
     const out = new Map<string, RemoteStats>()
     for (const id of ids) {
       try {
-        const m = await graph<{ like_count?: number; comments_count?: number }>('GET', id, { fields: 'like_count,comments_count' })
-        const ins = await graph<{ data?: { name: string; values?: { value: number }[] }[] }>('GET', `${id}/insights`, { metric: 'views' }).catch(
+        const m = await graph<{ like_count?: number; comments_count?: number }>(profileId, 'GET', id, { fields: 'like_count,comments_count' })
+        const ins = await graph<{ data?: { name: string; values?: { value: number }[] }[] }>(profileId, 'GET', `${id}/insights`, {
+          metric: 'views'
+        }).catch(
           () => ({ data: [] })
         )
         const views = ins.data?.find((d) => d.name === 'views')?.values?.[0]?.value ?? 0

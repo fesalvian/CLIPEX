@@ -1,6 +1,8 @@
 import type { ReactNode } from 'react'
-import { useStore } from '../store'
+import { KIND_LABEL } from '@shared/defaults'
+import { useActiveProfile, useStore } from '../store'
 import { Icon } from './Icon'
+import { ProfileAvatar } from './ProfileAvatar'
 
 export type StepKey = 'analise' | 'clipar' | 'revisar'
 
@@ -24,6 +26,7 @@ export function AppHeader({ title, subtitle, step, analyzing, projectId, actions
   const go = useStore((s) => s.go)
   const openProject = useStore((s) => s.openProject)
   const idx = STEPS.findIndex((s) => s.key === step)
+  const profile = useActiveProfile()
 
   return (
     <header className="app-header">
@@ -35,6 +38,15 @@ export function AppHeader({ title, subtitle, step, analyzing, projectId, actions
           <span className="brand-title">{title}</span>
           {subtitle && <span className="brand-sub">{subtitle}</span>}
         </div>
+        {!step && profile && (
+          <button className="profile-switch" onClick={() => go({ name: 'profiles' })} title="Trocar de perfil">
+            <ProfileAvatar profile={profile} size={30} />
+            <span className="profile-switch-text">
+              <span>{profile.name}</span>
+              <span className="muted">{KIND_LABEL[profile.kind]}</span>
+            </span>
+          </button>
+        )}
       </div>
 
       {step && (

@@ -8,7 +8,11 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { app, type BrowserWindow } from 'electron'
-import { clipsRepo, projectsRepo } from './db'
+import { clipsRepo, postsRepo, projectsRepo } from './db'
+import { createProfile, selectProfile, updateProfile } from './profiles'
+import { createProject } from './projects'
+import { enqueueAnalysis } from './pipeline'
+import { defaultAutoPost } from '@shared/defaults'
 import { isDev } from './paths'
 import { killAllProcesses } from './proc'
 import { updateSettings } from './settings'
@@ -79,6 +83,15 @@ export async function runDevTour(win: BrowserWindow): Promise<void> {
         await store(`await s.openProject(${JSON.stringify(p.id)}, 'clipar')`)
         await sleep(3000)
         await shot('q2-clipar')
+        await js(`[...document.querySelectorAll('button')].find((b) => b.textContent.includes('Adicionar corte manual'))?.click()`)
+        await sleep(2500)
+        await shot('q2b-corte-manual')
+        await js(`document.querySelector('[aria-label="Aproximar"]')?.click()`)
+        await sleep(300)
+        await js(`document.querySelector('[aria-label="Aproximar"]')?.click()`)
+        await sleep(1500)
+        await shot('q2c-corte-manual-zoom')
+        await js(`document.querySelector('.modal-actions .btn')?.click()`)
       }
       await store(`s.go({ name: 'settings' })`)
       await sleep(2500)
@@ -97,6 +110,12 @@ export async function runDevTour(win: BrowserWindow): Promise<void> {
         await sleep(1500)
         await shot('q7-inicio-analise')
       }
+      return
+    }
+
+    // CLIPADOR_TOUR=podcast: perfil de podcast com postagem automática, vídeo importado como automático
+    if (process.env.CLIPADOR_TOUR === 'podcast') {
+      await podcastTour(shot, store, js, log)
       return
     }
 
@@ -224,4 +243,74 @@ export async function runDevTour(win: BrowserWindow): Promise<void> {
       app.exit(0)
     }
   }
+}
+
+async function podcastTour(
+  shot: (name: string) => Promise<void>,
+  store: (expr: string) => Promise<unknown>,
+  js: <T = unknown>(code: string) => Promise<T>,
+  log: (m: string) => void
+): Promise<void> {
+  const prof = createProfile({ name: 'cortes do broxada', kind: 'podcast', subject: 'podcast Broxada Sinistra' })
+  updateProfile(prof.id, { autoPost: { ...defaultAutoPost(), enabled: true, minScore: 50, networks: ['youtube', 'tiktok'] } })
+  createProfile({ name: 'cortes alanzoka', kind: 'gameplay', subject: 'streamer Alanzoka' })
+  selectProfile(prof.id)
+  await store(`s.set({ profiles: await window.api.invoke('profiles:list') }); s.go({ name: 'profiles' })`)
+  await sleep(1500)
+  await shot('p1-perfis')
+  await js(`[...document.querySelectorAll('.profile-tile')].find((b) => b.textContent.includes('Novo perfil'))?.click()`)
+  await sleep(800)
+  await shot('p2-novo-perfil')
+  await js(`document.querySelector('.modal-actions .btn')?.click()`)
+  await store(`await s.selectProfile(${JSON.stringify(prof.id)})`)
+  const file = process.env.CLIPADOR_IMPORT
+  if (!file) return
+  const p0 = createProject(file, { profileId: prof.id, auto: true, name: 'EP teste' })
+  enqueueAnalysis(p0.id)
+  await sleep(3000)
+  await shot('p3-inicio-podcast')
+  await waitFor(() => clipsRepo.byProject(p0.id).length > 0, 15 * 60 * 1000)
+  await store(`await s.openProject(${JSON.stringify(p0.id)}, 'clipar')`)
+  await sleep(3000)
+  await shot('p4-clipar-progressivo')
+  await waitFor(() => ['ready', 'error'].includes(projectsRepo.get(p0.id)?.status ?? ''), 20 * 60 * 1000, 2000)
+  const p = projectsRepo.get(p0.id)!
+  log(`análise: ${p.status} ${p.error ?? ''} · etapas ${JSON.stringify(Object.fromEntries(Object.entries(p.stages).map(([k, v]) => [k, v.status])))}`)
+  for (const c of clipsRepo.byProject(p0.id)) {
+    log(`corte ${c.number}: ${c.cutIn}-${c.cutOut} (${(c.cutOut - c.cutIn).toFixed(0)} s) nota ${c.llm?.score} "${c.llm?.title}" ganchos ${JSON.stringify(c.llm?.hooks)}`)
+    const text = (c.words ?? []).filter((w) => w.s >= c.cutIn && w.e <= c.cutOut).map((w) => w.w).join(' ')
+    log(`   texto: ${text.slice(0, 160)} … ${text.slice(-160)}`)
+  }
+  // postagem automática: espera os posts aparecerem (agendados sem conta conectada: ficam esperando)
+  await waitFor(() => postsRepo.all(p0.id).length > 0, 10 * 60 * 1000, 2000)
+  for (const post of postsRepo.all(p0.id)) log(`post ${post.network} ${post.scheduledAt} auto=${post.auto} "${post.title ?? post.text.slice(0, 60)}"`)
+  await waitFor(
+    () => clipsRepo.byProject(p0.id).filter((c) => c.approved).every((c) => ['done', 'error'].includes(c.render.status)),
+    15 * 60 * 1000,
+    2000
+  )
+  for (const c of clipsRepo.byProject(p0.id).filter((x) => x.approved)) {
+    log(`render ${c.number} (${c.layout}): ${c.render.status} ${c.render.path ?? ''} ${c.render.error ?? ''} planos ${JSON.stringify(c.faces?.shots)}`)
+  }
+  await store(`await s.openProject(${JSON.stringify(p0.id)}, 'clipar')`)
+  await sleep(2500)
+  await js(`document.querySelector('.play-btn')?.click()`)
+  await sleep(4000)
+  await shot('p5-clipar-seguindo-rosto')
+  await js(`document.querySelector('.play-btn.on')?.click()`)
+  await js(`[...document.querySelectorAll('.seg button')].find((b) => b.textContent === 'Vídeo inteiro')?.click()`)
+  await sleep(2500)
+  await shot('p6-clipar-video-inteiro')
+  await store(`await s.openProject(${JSON.stringify(p0.id)}, 'revisar')`)
+  await sleep(2500)
+  await shot('p7-revisar')
+  await store(`s.go({ name: 'home' })`)
+  await sleep(1500)
+  await shot('p8-inicio-pronto')
+  await store(`s.go({ name: 'settings' })`)
+  await sleep(2500)
+  await shot('p9-config-perfil')
+  await store(`s.go({ name: 'posts' })`)
+  await sleep(2000)
+  await shot('p10-agendados')
 }

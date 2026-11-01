@@ -4,6 +4,7 @@
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { safeStorage } from 'electron'
+import { DEFAULT_PROFILE_ID } from '@shared/defaults'
 import type { Clip, Post, PostMetric, Project } from '@shared/types'
 import { userDataDir } from './paths'
 
@@ -71,15 +72,27 @@ export const settingsRepo = {
   }
 }
 
+/** Projetos de antes dos perfis são do Felipe (gameplay, criados à mão). */
+export function upgradeProject(p: Project): Project {
+  const x = p as Project & Partial<Project>
+  x.profileId ??= DEFAULT_PROFILE_ID
+  x.kind ??= 'gameplay'
+  x.auto ??= false
+  x.sourceUrl ??= null
+  return x
+}
+
 export const projectsRepo = {
   get(id: string): Project | null {
-    return parse<Project>(db().prepare('SELECT data FROM projects WHERE id = ?').get(id))
+    const p = parse<Project>(db().prepare('SELECT data FROM projects WHERE id = ?').get(id))
+    return p ? upgradeProject(p) : null
   },
   all(): Project[] {
-    return parseAll<Project>(db().prepare('SELECT data FROM projects ORDER BY created_at DESC').all())
+    return parseAll<Project>(db().prepare('SELECT data FROM projects ORDER BY created_at DESC').all()).map(upgradeProject)
   },
   bySource(path: string): Project | null {
-    return parse<Project>(db().prepare('SELECT data FROM projects WHERE lower(source_path) = lower(?)').get(path))
+    const p = parse<Project>(db().prepare('SELECT data FROM projects WHERE lower(source_path) = lower(?)').get(path))
+    return p ? upgradeProject(p) : null
   },
   save(p: Project): void {
     db()
@@ -101,6 +114,7 @@ export function upgradeClip(c: Clip): Clip {
   x.captionStyle ??= null
   x.hookStyle ??= null
   x.crop ??= null
+  x.faces ??= null
   if (!x.segments?.length) x.segments = [{ s: x.cutIn, e: x.cutOut }]
   if (x.wordsFrom === undefined) x.wordsFrom = x.words ? x.winStart : null
   if (x.wordsTo === undefined) x.wordsTo = x.words ? x.winEnd : null

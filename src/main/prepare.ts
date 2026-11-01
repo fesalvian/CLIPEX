@@ -14,15 +14,17 @@ import {
   CAPTIONS_SCHEMA,
   captionsFromOutput,
   captionsPrompt,
+  channelIntro,
   HOOKS_SCHEMA,
   hooksPrompt,
   stripEmoji,
   type CaptionsOutput
 } from './llm/prompts'
 import { processClip, transcribeClip } from './pipeline'
+import { profileOfProject } from './profiles'
 import { enqueueRender } from './render/queue'
 import { llmLane } from './sema'
-import { getSettings, platformRules } from './settings'
+import { platformRules, projectSettings } from './settings'
 import { captionStyleBlock, hookStyleBlock } from './style'
 
 function errMsg(e: unknown): string {
@@ -40,6 +42,7 @@ export async function generateCaptions(clipId: string, provider?: LlmProvider): 
   if (!c) throw new Error('Corte não encontrado')
   if (!c.words) throw new Error('O corte ainda não foi transcrito.')
   const rules = platformRules()
+  const profile = profileOfProject(c.projectId)
   const out = await llmLane.run(async () => {
     const client = await llmClient(provider)
     const game = projectsRepo.get(c.projectId)?.game ?? null
@@ -51,8 +54,9 @@ export async function generateCaptions(clipId: string, provider?: LlmProvider): 
       hookText(c),
       c.llm?.title ?? null,
       rules,
-      getSettings().accounts,
-      captionStyleBlock(game)
+      projectSettings(c.projectId).accounts,
+      captionStyleBlock(profile.id, game),
+      channelIntro(profile)
     )
     return client.chatJson<CaptionsOutput>(system, user, CAPTIONS_SCHEMA)
   })
@@ -72,7 +76,15 @@ export async function generateHooks(clipId: string, provider?: LlmProvider): Pro
   const out = await llmLane.run(async () => {
     const client = await llmClient(provider)
     const spoken = spokenWords(c)
-    const { system, user } = hooksPrompt(spoken.words, 0, spoken.duration, avoid, hookStyleBlock(projectsRepo.get(c.projectId)?.game ?? null))
+    const profile = profileOfProject(c.projectId)
+    const { system, user } = hooksPrompt(
+      spoken.words,
+      0,
+      spoken.duration,
+      avoid,
+      hookStyleBlock(profile.id, projectsRepo.get(c.projectId)?.game ?? null),
+      channelIntro(profile)
+    )
     return { r: await client.chatJson<{ hooks: string[] }>(system, user, HOOKS_SCHEMA), provider: client.provider }
   })
   const hooks = out.r.hooks.map((h) => stripEmoji(h).toLocaleUpperCase('pt-BR')).filter(Boolean).slice(0, 3)
@@ -131,7 +143,13 @@ function step(id: string, message: string): void {
   })
 }
 
-async function prepareOne(id: string): Promise<void> {
+/** Prepara um corte e espera terminar (postagem automática). Não manda renderizar. */
+export async function prepareClip(id: string): Promise<Clip | null> {
+  await prepareOne(id, false)
+  return clipsRepo.get(id)
+}
+
+async function prepareOne(id: string, render = true): Promise<void> {
   let c: Clip | null = clipsRepo.get(id)
   if (!c) return
   try {
@@ -158,7 +176,7 @@ async function prepareOne(id: string): Promise<void> {
       x.prep = 'ready'
       x.prepMessage = null
     })
-    void enqueueRender(id).catch(() => undefined)
+    if (render) void enqueueRender(id).catch(() => undefined)
   } catch (e) {
     mutateClip(id, (x) => {
       x.prep = 'error'
@@ -201,7 +219,7 @@ export function applyDictionaryToClip(clipId: string): Clip {
   if (!c) throw new Error('Corte não encontrado')
   if (!c.cues) return c
   return mutateClip(clipId, (x) => {
-    x.cues = applyDictionary(x.cues!, getSettings().dictionary)
+    x.cues = applyDictionary(x.cues!, projectSettings(x.projectId).dictionary)
     if (x.render.status === 'done') x.render = { ...x.render, status: 'stale' }
   })!
 }

@@ -4,8 +4,9 @@ import { createReadStream, statSync } from 'node:fs'
 import { Readable } from 'node:stream'
 import { secretsRepo } from '../db'
 import { env } from '../env'
+import { secretKey } from '../profiles'
 import { loopbackAuth, pkce, postForm } from './oauth'
-import type { NetworkClient, PublishInput, PublishResult, RemoteStats } from './types'
+import { QuotaError, type NetworkClient, type PublishInput, type PublishResult, type RemoteStats } from './types'
 
 // force-ssl: mudar o horário ou apagar um Short já agendado (organizar a fila)
 const EDIT_SCOPE = 'https://www.googleapis.com/auth/youtube.force-ssl'
@@ -28,8 +29,9 @@ function creds(): { id: string; secret: string } {
   return { id, secret }
 }
 
-async function accessToken(): Promise<string> {
-  const t = secretsRepo.get<Tokens>(KEY)
+async function accessToken(profileId: string): Promise<string> {
+  const key = secretKey(KEY, profileId)
+  const t = secretsRepo.get<Tokens>(key)
   if (!t) throw new Error('Conecte a conta do YouTube nas configurações.')
   if (Date.now() < t.expires_at - 60_000) return t.access_token
   const { id, secret } = creds()
@@ -40,18 +42,26 @@ async function accessToken(): Promise<string> {
     grant_type: 'refresh_token'
   })
   const next = { ...t, access_token: String(r.access_token), expires_at: Date.now() + Number(r.expires_in ?? 3600) * 1000 }
-  secretsRepo.set(KEY, next)
+  secretsRepo.set(key, next)
   return next.access_token
 }
 
-async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const token = await accessToken()
+/** Erro de cota da API (10.000 unidades por dia, por projeto do Google). */
+function isQuota(message: string): boolean {
+  return /quota/i.test(message)
+}
+
+async function api<T>(profileId: string, path: string, init: RequestInit = {}): Promise<T> {
+  const token = await accessToken(profileId)
   const res = await fetch(`https://www.googleapis.com/youtube/v3/${path}`, {
     ...init,
     headers: { ...(init.headers ?? {}), authorization: `Bearer ${token}` }
   })
   const json = (await res.json().catch(() => ({}))) as T & { error?: { message?: string } }
-  if (!res.ok) throw new Error(`YouTube: ${json.error?.message ?? res.status}`)
+  if (!res.ok) {
+    const msg = `YouTube: ${json.error?.message ?? res.status}`
+    throw isQuota(msg) ? new QuotaError(msg) : new Error(msg)
+  }
   return json
 }
 
@@ -61,13 +71,13 @@ export function youtubeDescription(text: string, hashtags: string[]): string {
 }
 
 /** A conexão permite mudar o horário e apagar Shorts já agendados (conexões antigas não). */
-export function youtubeCanEdit(): boolean {
-  return !!secretsRepo.get<Tokens>(KEY)?.scope?.includes(EDIT_SCOPE)
+export function youtubeCanEdit(profileId: string): boolean {
+  return !!secretsRepo.get<Tokens>(secretKey(KEY, profileId))?.scope?.includes(EDIT_SCOPE)
 }
 
 /** Muda a hora de publicar de um Short já agendado no YouTube. */
-export async function youtubeReschedule(videoId: string, publishAt: Date): Promise<void> {
-  await api('videos?part=status', {
+export async function youtubeReschedule(profileId: string, videoId: string, publishAt: Date): Promise<void> {
+  await api(profileId, 'videos?part=status', {
     method: 'PUT',
     headers: { 'content-type': 'application/json; charset=UTF-8' },
     body: JSON.stringify({
@@ -78,19 +88,20 @@ export async function youtubeReschedule(videoId: string, publishAt: Date): Promi
 }
 
 /** Apaga um Short (privado, agendado) do canal. */
-export async function youtubeDelete(videoId: string): Promise<void> {
-  await api(`videos?id=${encodeURIComponent(videoId)}`, { method: 'DELETE' })
+export async function youtubeDelete(profileId: string, videoId: string): Promise<void> {
+  await api(profileId, `videos?id=${encodeURIComponent(videoId)}`, { method: 'DELETE' })
 }
 
 export const youtube: NetworkClient = {
   network: 'youtube',
 
-  async connected() {
-    const t = secretsRepo.get<Tokens>(KEY)
+  async connected(profileId) {
+    const t = secretsRepo.get<Tokens>(secretKey(KEY, profileId))
     return { connected: !!t, account: t?.channel ?? null }
   },
 
-  async connect() {
+  async connect(profileId) {
+    const key = secretKey(KEY, profileId)
     const { id, secret } = creds()
     const p = pkce()
     const { code, redirectUri } = await loopbackAuth((redirect, state) => {
@@ -100,7 +111,8 @@ export const youtube: NetworkClient = {
         response_type: 'code',
         scope: SCOPES.join(' '),
         access_type: 'offline',
-        prompt: 'consent',
+        // escolher a conta: cada perfil pode ser um canal diferente
+        prompt: 'consent select_account',
         state,
         code_challenge: p.challenge,
         code_challenge_method: 'S256'
@@ -115,7 +127,7 @@ export const youtube: NetworkClient = {
       grant_type: 'authorization_code',
       redirect_uri: redirectUri
     })
-    secretsRepo.set(KEY, {
+    secretsRepo.set(key, {
       access_token: String(r.access_token),
       refresh_token: String(r.refresh_token ?? ''),
       expires_at: Date.now() + Number(r.expires_in ?? 3600) * 1000,
@@ -123,23 +135,23 @@ export const youtube: NetworkClient = {
       scope: String(r.scope ?? '')
     } satisfies Tokens)
     try {
-      const ch = await api<{ items?: { snippet?: { customUrl?: string; title?: string } }[] }>('channels?part=snippet&mine=true')
+      const ch = await api<{ items?: { snippet?: { customUrl?: string; title?: string } }[] }>(profileId, 'channels?part=snippet&mine=true')
       const sn = ch.items?.[0]?.snippet
-      const t = secretsRepo.get<Tokens>(KEY)!
-      secretsRepo.set(KEY, { ...t, channel: sn?.customUrl ?? sn?.title ?? null })
+      const t = secretsRepo.get<Tokens>(key)!
+      secretsRepo.set(key, { ...t, channel: sn?.customUrl ?? sn?.title ?? null })
     } catch {
       // nome do canal é só pra exibir
     }
   },
 
-  async publish(input: PublishInput, onProgress): Promise<PublishResult> {
-    const token = await accessToken()
+  async publish(profileId, input: PublishInput, onProgress): Promise<PublishResult> {
+    const token = await accessToken(profileId)
     const size = statSync(input.videoPath).size
     const meta = {
       snippet: {
         title: (input.title ?? '').slice(0, 100),
         description: youtubeDescription(input.text, input.hashtags),
-        categoryId: '20',
+        categoryId: input.categoryId ?? '20',
         defaultLanguage: 'pt-BR',
         defaultAudioLanguage: 'pt-BR'
       },
@@ -160,7 +172,11 @@ export const youtube: NetworkClient = {
       body: JSON.stringify(meta)
     })
     const location = init.headers.get('location')
-    if (!init.ok || !location) throw new Error(`YouTube recusou o upload: ${await init.text()}`)
+    if (!init.ok || !location) {
+      const body = await init.text()
+      if (isQuota(body)) throw new QuotaError('YouTube: a cota diária da API acabou.')
+      throw new Error(`YouTube recusou o upload: ${body}`)
+    }
     let sent = 0
     const stream = createReadStream(input.videoPath)
     stream.on('data', (chunk) => {
@@ -178,7 +194,7 @@ export const youtube: NetworkClient = {
     // Projeto sem auditoria da API: o YouTube trava o vídeo como privado mesmo pedindo público.
     let privacy = json.status?.privacyStatus
     try {
-      const st = await api<{ items?: { status?: { privacyStatus?: string } }[] }>(`videos?part=status&id=${json.id}`)
+      const st = await api<{ items?: { status?: { privacyStatus?: string } }[] }>(profileId, `videos?part=status&id=${json.id}`)
       privacy = st.items?.[0]?.status?.privacyStatus ?? privacy
     } catch {
       // sem leitura do status: fica com o que veio no upload
@@ -195,11 +211,12 @@ export const youtube: NetworkClient = {
     }
   },
 
-  async metrics(ids: string[]) {
+  async metrics(profileId, ids: string[]) {
     const out = new Map<string, RemoteStats>()
     for (let i = 0; i < ids.length; i += 50) {
       const batch = ids.slice(i, i + 50)
       const r = await api<{ items?: { id: string; statistics?: Record<string, string> }[] }>(
+        profileId,
         `videos?part=statistics&id=${batch.join(',')}`
       )
       for (const it of r.items ?? []) {

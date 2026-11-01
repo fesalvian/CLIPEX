@@ -1,12 +1,14 @@
 // Apaga o arquivo bruto da live X dias depois que todos os cortes aprovados foram postados.
-// Opcional (desligado por padrão) e só mexe em arquivos da pasta vigiada.
+// Opcional (configurado em cada perfil) e só mexe em arquivos da pasta vigiada do perfil ou
+// baixados pelo app (download automático, VOD da Twitch).
 
 import { existsSync, rmSync } from 'node:fs'
 import { normalize, resolve } from 'node:path'
 import { toast } from './bus'
 import { clipsRepo, postsRepo, projectsRepo } from './db'
 import { saveProject } from './projects'
-import { getSettings } from './settings'
+import { downloadsDir } from './paths'
+import { projectSettings } from './settings'
 
 const DAY = 24 * 3600 * 1000
 
@@ -34,18 +36,40 @@ export function allPostedAt(projectId: string): number | null {
   return last
 }
 
+/**
+ * Projeto da postagem automática com todos os cortes escolhidos já renderizados: o bruto não
+ * faz mais falta (postar usa o vídeo pronto).
+ */
+export function allRendered(projectId: string): boolean {
+  const p = projectsRepo.get(projectId)
+  if (!p?.auto || p.status !== 'ready') return false
+  const approved = clipsRepo.byProject(projectId).filter((c) => c.approved)
+  return approved.length > 0 && approved.every((c) => c.render.status === 'done' && !!c.render.path && existsSync(c.render.path))
+}
+
 export function cleanupRawFiles(now = Date.now()): void {
-  const s = getSettings()
-  if (!s.deleteRawAfterDays) return
   for (const p of projectsRepo.all()) {
-    if (p.rawDeletedAt || !existsSync(p.sourcePath) || !insideFolder(p.sourcePath, s.watchFolder)) continue
-    const last = allPostedAt(p.id)
-    if (last === null || now - last < s.deleteRawAfterDays * DAY) continue
+    const s = projectSettings(p.id)
+    if (!s.deleteRawAfterDays) continue
+    const ours = insideFolder(p.sourcePath, s.watchFolder) || insideFolder(p.sourcePath, downloadsDir())
+    if (p.rawDeletedAt || !existsSync(p.sourcePath) || !ours) continue
+    // -1: logo que os cortes da postagem automática ficam prontos (vídeos baixados ocupam muito)
+    if (s.deleteRawAfterDays < 0) {
+      if (!allRendered(p.id)) continue
+    } else {
+      const last = allPostedAt(p.id)
+      if (last === null || now - last < s.deleteRawAfterDays * DAY) continue
+    }
     try {
       rmSync(p.sourcePath)
       p.rawDeletedAt = new Date(now).toISOString()
       saveProject(p, { list: true })
-      toast('info', `Arquivo bruto de ${p.name} apagado (cortes postados há mais de ${s.deleteRawAfterDays} dias).`)
+      toast(
+        'info',
+        s.deleteRawAfterDays < 0
+          ? `Arquivo bruto de ${p.name} apagado (os cortes já estão prontos).`
+          : `Arquivo bruto de ${p.name} apagado (cortes postados há mais de ${s.deleteRawAfterDays} dias).`
+      )
     } catch {
       // arquivo em uso: tenta na próxima rodada
     }

@@ -4,6 +4,7 @@
 import { closeSync, openSync, readSync, statSync } from 'node:fs'
 import { secretsRepo } from '../db'
 import { env } from '../env'
+import { secretKey } from '../profiles'
 import { loopbackAuth, pkce, postForm } from './oauth'
 import type { NetworkClient, PublishResult, RemoteStats } from './types'
 
@@ -39,8 +40,9 @@ function creds(): { key: string; secret: string } {
   return { key, secret }
 }
 
-async function accessToken(): Promise<string> {
-  const t = secretsRepo.get<Tokens>(KEY)
+async function accessToken(profileId: string): Promise<string> {
+  const tokenKey = secretKey(KEY, profileId)
+  const t = secretsRepo.get<Tokens>(tokenKey)
   if (!t) throw new Error('Conecte a conta do TikTok nas configurações.')
   if (Date.now() < t.expires_at - 60_000) return t.access_token
   const { key, secret } = creds()
@@ -56,12 +58,12 @@ async function accessToken(): Promise<string> {
     refresh_token: String(r.refresh_token ?? t.refresh_token),
     expires_at: Date.now() + Number(r.expires_in ?? 86400) * 1000
   }
-  secretsRepo.set(KEY, next)
+  secretsRepo.set(tokenKey, next)
   return next.access_token
 }
 
-async function api<T>(path: string, body: unknown): Promise<T> {
-  const token = await accessToken()
+async function api<T>(profileId: string, path: string, body: unknown): Promise<T> {
+  const token = await accessToken(profileId)
   const res = await fetch(`https://open.tiktokapis.com${path}`, {
     method: 'POST',
     headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json; charset=UTF-8' },
@@ -75,12 +77,13 @@ async function api<T>(path: string, body: unknown): Promise<T> {
 export const tiktok: NetworkClient = {
   network: 'tiktok',
 
-  async connected() {
-    const t = secretsRepo.get<Tokens>(KEY)
+  async connected(profileId) {
+    const t = secretsRepo.get<Tokens>(secretKey(KEY, profileId))
     return { connected: !!t, account: t?.account ?? null }
   },
 
-  async connect() {
+  async connect(profileId) {
+    const tokenKey = secretKey(KEY, profileId)
     const { key, secret } = creds()
     // O TikTok desktop usa o desafio PKCE em hexadecimal.
     const p = pkce('hex')
@@ -107,7 +110,7 @@ export const tiktok: NetworkClient = {
       redirect_uri: redirectUri,
       code_verifier: p.verifier
     })
-    secretsRepo.set(KEY, {
+    secretsRepo.set(tokenKey, {
       access_token: String(r.access_token),
       refresh_token: String(r.refresh_token ?? ''),
       expires_at: Date.now() + Number(r.expires_in ?? 86400) * 1000,
@@ -115,23 +118,23 @@ export const tiktok: NetworkClient = {
       account: null
     } satisfies Tokens)
     try {
-      const token = await accessToken()
+      const token = await accessToken(profileId)
       const res = await fetch('https://open.tiktokapis.com/v2/user/info/?fields=display_name,username', {
         headers: { authorization: `Bearer ${token}` }
       })
       const json = (await res.json()) as { data?: { user?: { username?: string; display_name?: string } } }
       const u = json.data?.user
-      const t = secretsRepo.get<Tokens>(KEY)!
-      secretsRepo.set(KEY, { ...t, account: u?.username ? `@${u.username}` : (u?.display_name ?? null) })
+      const t = secretsRepo.get<Tokens>(tokenKey)!
+      secretsRepo.set(tokenKey, { ...t, account: u?.username ? `@${u.username}` : (u?.display_name ?? null) })
     } catch {
       // nome da conta é só pra exibir
     }
   },
 
-  async publish(input, onProgress): Promise<PublishResult> {
+  async publish(profileId, input, onProgress): Promise<PublishResult> {
     const size = statSync(input.videoPath).size
     const { chunkSize: chunk, count } = chunkPlan(size)
-    const init = await api<{ publish_id: string; upload_url: string }>('/v2/post/publish/inbox/video/init/', {
+    const init = await api<{ publish_id: string; upload_url: string }>(profileId, '/v2/post/publish/inbox/video/init/', {
       source_info: { source: 'FILE_UPLOAD', video_size: size, chunk_size: chunk, total_chunk_count: count }
     })
     const fd = openSync(input.videoPath, 'r')

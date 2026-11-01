@@ -20,7 +20,8 @@ function even(n: number): number {
 
 /** Como o 1080×1920 é dividido entre webcam e jogo. */
 export function layoutPanes(layout: ClipLayout, split: CamSplit, outW = OUT_W, outH = OUT_H): Pane[] {
-  if (layout === 'game') return [{ kind: 'game', out: { x: 0, y: 0, w: outW, h: outH } }]
+  // vídeo inteiro e seguir quem fala usam o quadro todo (montados à parte no render e no preview)
+  if (layout === 'game' || layout === 'fit' || layout === 'face') return [{ kind: 'game', out: { x: 0, y: 0, w: outW, h: outH } }]
   if (layout === 'cam') return [{ kind: 'cam', out: { x: 0, y: 0, w: outW, h: outH } }]
   const camH = even((outH * split) / 100)
   return [
@@ -75,7 +76,21 @@ export function clampRect(r: Rect, minSize = 0.04): Rect {
   return { x: Math.max(0, Math.min(1 - w, r.x)), y: Math.max(0, Math.min(1 - h, r.y)), w, h }
 }
 
+/** Onde o quadro 16:9 fica no layout 'fit' (vídeo inteiro): largura toda, um pouco acima do meio. */
+export function fitBox(srcW: number, srcH: number, outW = OUT_W, outH = OUT_H): PixelRect {
+  const w = outW
+  const h = Math.max(2, Math.round((outW * srcH) / Math.max(1, srcW) / 2) * 2)
+  const y = Math.max(0, Math.round(((outH - h) * 0.42) / 2) * 2)
+  return { x: 0, y, w, h }
+}
+
 /** Topo da legenda no vídeo final, em fração da altura. */
 export function captionAnchor(layout: ClipLayout, split: CamSplit): number {
-  return layout === 'both' ? split / 100 : 0.62
+  if (layout === 'both') return split / 100
+  // vídeo inteiro: logo abaixo do quadro (16:9 numa fonte típica)
+  if (layout === 'fit') {
+    const b = fitBox(16, 9)
+    return (b.y + b.h) / OUT_H
+  }
+  return 0.62
 }

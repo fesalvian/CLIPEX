@@ -26,6 +26,11 @@ export function projectDir(id: string): string {
   return ensureDir(join(projectsDir(), id))
 }
 
+/** Vídeos baixados pelo app (VOD da Twitch, canais vigiados). */
+export function downloadsDir(): string {
+  return ensureDir(join(userDataDir(), 'vods'))
+}
+
 /** Componentes baixados pelo app (Whisper, modelos). */
 export function componentsDir(): string {
   return ensureDir(join(userDataDir(), 'components'))

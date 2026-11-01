@@ -5,9 +5,18 @@ export type Network = 'instagram' | 'tiktok' | 'youtube'
 export const NETWORKS: readonly Network[] = ['instagram', 'tiktok', 'youtube']
 
 export type LlmProvider = 'openai' | 'local'
-export type ClipLayout = 'both' | 'game' | 'cam'
+/**
+ * Tipo de clipe do perfil: gameplay (webcam + jogo, momentos por risada/grito), podcast
+ * (conversas completas, câmera seguindo quem fala) ou vídeo 16:9 (o quadro inteiro no 9:16).
+ */
+export type ClipKind = 'gameplay' | 'podcast' | 'wide'
+/**
+ * both/game/cam: webcam e jogo recortados (gameplay); fit: o quadro 16:9 inteiro no meio,
+ * com fundo desfocado; face: recorte 9:16 que segue o rosto de quem está falando.
+ */
+export type ClipLayout = 'both' | 'game' | 'cam' | 'fit' | 'face'
 export type CamSplit = 30 | 40 | 50
-export type DetectedTag = 'laugh' | 'scream' | 'peak' | 'manual'
+export type DetectedTag = 'laugh' | 'scream' | 'peak' | 'manual' | 'talk'
 
 /** Retângulo normalizado (0..1) sobre o frame da live. */
 export interface Rect {
@@ -26,6 +35,20 @@ export interface Cut {
 export interface CropLayout {
   cam: Rect
   game: Rect
+}
+
+/** Trecho em que a câmera fica parada num rosto: centro x (0..1 da largura da fonte), tempo na fonte. */
+export interface FaceShot {
+  s: number
+  e: number
+  x: number
+}
+
+/** Câmera seguindo o rosto de quem fala, calculada pra um pedaço da fonte. */
+export interface FaceTrack {
+  from: number
+  to: number
+  shots: FaceShot[]
 }
 
 export type TrackRole = 'mix' | 'mic' | 'game' | 'discord' | 'music' | 'unknown'
@@ -66,6 +89,14 @@ export type ProjectStatus = 'queued' | 'analyzing' | 'ready' | 'error'
 
 export interface Project {
   id: string
+  /** perfil (canal) dono do projeto */
+  profileId: string
+  /** tipo de clipe do perfil quando o projeto foi criado */
+  kind: ClipKind
+  /** criado pelo modo automático (download do canal ou pasta vigiada com postagem automática) */
+  auto: boolean
+  /** link de onde o vídeo foi baixado */
+  sourceUrl: string | null
   name: string
   liveDate: string | null
   createdAt: string
@@ -194,6 +225,8 @@ export interface Clip {
   captions: Captions | null
   /** logo própria deste corte; null = segue o padrão das configurações */
   watermark: Watermark | null
+  /** câmera seguindo o rosto (layout 'face') */
+  faces: FaceTrack | null
   previewPath: string | null
   previewStart: number | null
   previewEnd: number | null
@@ -291,6 +324,18 @@ export interface Accounts {
   youtube: string
 }
 
+/** Configurações que valem pra todos os perfis. */
+export const GLOBAL_SETTING_KEYS = [
+  'llmProvider',
+  'openaiModel',
+  'ollamaUrl',
+  'ollamaModel',
+  'whisperModel',
+  'startWithWindows',
+  'encoder',
+  'youtubeDailyUploads'
+] as const
+
 export interface Settings {
   watchFolder: string
   watchEnabled: boolean
@@ -312,6 +357,73 @@ export interface Settings {
   accounts: Accounts
   text: TextDefaults
   style: WritingStyle
+  /**
+   * Uploads por dia no YouTube (todos os perfis): a cota padrão da API (10.000 unidades)
+   * dá uns 6 uploads de 1.600 unidades.
+   */
+  youtubeDailyUploads: number
+}
+
+/** Canal vigiado: quando sai vídeo novo, o app baixa e começa a análise sozinho. */
+export interface AutoSource {
+  /** link do canal (YouTube ou Twitch) */
+  url: string
+  enabled: boolean
+  /** vídeos mais curtos que isso são ignorados (min) */
+  minMinutes: number
+  /** qualidade máxima do download */
+  maxHeight: 720 | 1080
+  /** de quanto em quanto tempo olhar o canal (min) */
+  checkEveryMin: number
+  /** já marcou os vídeos antigos do canal como vistos */
+  primed: boolean
+  /** na primeira olhada, baixa também o vídeo mais recente */
+  startWithLatest: boolean
+  lastCheckAt: string | null
+  lastError: string | null
+  /** ids dos vídeos já tratados (baixados ou ignorados) */
+  seen: string[]
+}
+
+/** Postagem automática: escolhe os melhores cortes, gera tudo e agenda sem pedir revisão. */
+export interface AutoPost {
+  enabled: boolean
+  networks: Network[]
+  /** cortes por dia em cada rede */
+  perDay: number
+  /** espalhar os cortes de um vídeo em até N dias */
+  days: number
+  /** nota mínima da IA (0 a 100) pra um corte ser postado */
+  minScore: number
+  /** duração máxima de um corte (s) */
+  maxClipSec: number
+  /** termos proibidos (um por linha ou separados por vírgula): o corte que falar algum fica de fora */
+  blocklist: string
+  /** freio: nada deste perfil é postado enquanto estiver pausado */
+  paused: boolean
+}
+
+/** Perfil (como os perfis da Netflix): um canal de cortes com contas, estilo e fila próprios. */
+export interface Profile {
+  id: string
+  name: string
+  kind: ClipKind
+  /** de quem são os vídeos (ex.: "podcast Broxada Sinistra", "streamer Alanzoka") */
+  subject: string
+  color: string
+  createdAt: string
+  source: AutoSource | null
+  autoPost: AutoPost
+}
+
+export interface SourceStatus {
+  profileId: string
+  checking: boolean
+  /** baixando agora */
+  download: { title: string; progress: number } | null
+  lastCheckAt: string | null
+  lastError: string | null
+  nextCheckAt: string | null
 }
 
 export type PostStatus = 'scheduled' | 'uploading' | 'posted' | 'draft' | 'failed' | 'canceled'
@@ -331,6 +443,10 @@ export interface Post {
   error: string | null
   /** aviso da rede depois de postar (ex.: YouTube travou como privado) */
   note?: string | null
+  /** agendado pela postagem automática (pode andar na fila quando chega vídeo novo) */
+  auto?: boolean
+  /** quando o vídeo subiu pra rede (conta a cota diária do YouTube) */
+  uploadedAt?: string | null
   createdAt: string
   postedAt: string | null
 }
@@ -343,7 +459,7 @@ export interface PostMetric {
   comments: number
 }
 
-export type ComponentKey = 'ffmpeg' | 'whisper' | 'whisperModel' | 'yamnet' | 'ytdlp'
+export type ComponentKey = 'ffmpeg' | 'whisper' | 'whisperModel' | 'yamnet' | 'faces' | 'ytdlp'
 
 export interface VodDownload {
   url: string
@@ -370,6 +486,9 @@ export interface WatcherStatus {
 
 export interface ProjectSummary {
   id: string
+  profileId: string
+  kind: ClipKind
+  auto: boolean
   name: string
   liveDate: string | null
   createdAt: string
@@ -379,6 +498,20 @@ export interface ProjectSummary {
   clipCount: number
   approvedCount: number
   error: string | null
+  /** primeiro corte da lista (aprovado, se tiver): dá nome e capa pro card da live */
+  cover: ProjectCover | null
+}
+
+export interface ProjectCover {
+  clipId: string
+  title: string
+  /** primeira vez que esse corte foi postado em alguma rede */
+  postedAt: string | null
+  /** trecho leve do preview (16:9, cam + jogo) ou, sem ele, o vídeo final (9:16) */
+  videoPath: string | null
+  /** onde o corte começa dentro desse vídeo (s) */
+  videoStart: number
+  vertical: boolean
 }
 
 export interface ScheduleSuggestion {

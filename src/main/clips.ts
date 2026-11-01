@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { ClipPatch } from '@shared/ipc'
-import { emptyRender, MAX_CUT, MIN_CUT } from '@shared/defaults'
+import { defaultLayout, emptyRender, MANUAL_CUT_SEC, MAX_CUT, MIN_CUT } from '@shared/defaults'
 import { cutIndexAt, cutsOf, normalizeCuts, withCuts, zoomPoint } from '@shared/cuts'
 import { applyDictionary, buildCuesInCuts, mergeCuesInCuts } from '@shared/subtitles'
 import { clipTitle, hookTextFor } from '@shared/text'
@@ -8,7 +8,7 @@ import type { Clip, Project } from '@shared/types'
 import type { Candidate } from './analysis/candidates'
 import { emit } from './bus'
 import { clipsRepo, projectsRepo } from './db'
-import { getSettings } from './settings'
+import { projectSettings } from './settings'
 
 export function newClip(project: Project, c: Candidate, number: number, origin: Clip['origin'] = 'auto'): Clip {
   return {
@@ -29,7 +29,7 @@ export function newClip(project: Project, c: Candidate, number: number, origin: 
     stageError: null,
     llm: null,
     approved: false,
-    layout: 'both',
+    layout: defaultLayout(project.kind),
     camSplit: 40,
     crop: null,
     hookChoice: null,
@@ -45,6 +45,7 @@ export function newClip(project: Project, c: Candidate, number: number, origin: 
     cues: null,
     captions: null,
     watermark: null,
+    faces: null,
     previewPath: null,
     previewStart: null,
     previewEnd: null,
@@ -123,7 +124,7 @@ export function updateClip(id: string, patch: ClipPatch): Clip {
       c.winEnd = Math.min(duration, c.winStart + span)
     }
     // legenda acompanha o novo corte sem perder o que já foi editado
-    if (c.cues && c.words && !patch.cues) c.cues = mergeCuesInCuts(c.cues, c.words, c.segments, getSettings().dictionary)
+    if (c.cues && c.words && !patch.cues) c.cues = mergeCuesInCuts(c.cues, c.words, c.segments, projectSettings(c.projectId).dictionary)
   }
   if (c.zoomAt !== null && cutIndexAt(cutsOf(c), c.zoomAt) < 0) c.zoomAt = null
 
@@ -134,16 +135,16 @@ export function updateClip(id: string, patch: ClipPatch): Clip {
 
 export function rebuildCues(c: Clip): Clip['cues'] {
   if (!c.words) return null
-  return applyDictionary(buildCuesInCuts(c.words, cutsOf(c)), getSettings().dictionary)
+  return applyDictionary(buildCuesInCuts(c.words, cutsOf(c)), projectSettings(c.projectId).dictionary)
 }
 
 /** "Clipe 07 · TEXTO DO GANCHO": nos avisos, na confirmação e na lista de agendados. */
 export function clipName(c: Clip): string {
-  return clipTitle(c, getSettings().text)
+  return clipTitle(c, projectSettings(c.projectId).text)
 }
 
 export function hookText(c: Clip): string | null {
-  return hookTextFor(c, getSettings().text)
+  return hookTextFor(c, projectSettings(c.projectId).text)
 }
 
 /** Momento do zoom: o escolhido, ou o pico detectado se estiver dentro do corte. */
@@ -158,15 +159,17 @@ export function nextClipNumber(projectId: string): number {
 export function createManualClip(projectId: string, at: number): Clip {
   const p = projectsRepo.get(projectId)
   if (!p?.source) throw new Error('Projeto ainda sem análise do arquivo.')
-  const half = getSettings().windowSec
+  const half = projectSettings(projectId).windowSec
   const dur = p.source.durationSec
-  const t = Math.max(0, Math.min(dur, at))
+  const t = Math.max(0, Math.min(dur - MIN_CUT, at))
+  const out = Math.min(dur, t + MANUAL_CUT_SEC)
   const cand: Candidate = {
     peak: t,
+    // folga dos dois lados pra ajustar nas alças
     winStart: Math.max(0, t - half),
-    winEnd: Math.min(dur, t + half),
-    cutIn: Math.max(0, t - 15),
-    cutOut: Math.min(dur, t + 15),
+    winEnd: Math.min(dur, out + half),
+    cutIn: t,
+    cutOut: out,
     score: 1,
     tags: ['manual']
   }

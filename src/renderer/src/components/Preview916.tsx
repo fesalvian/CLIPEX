@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, type PointerEvent as RPointerEvent } from 'react'
 import { OUT_W } from '@shared/defaults'
-import { coverCrop, layoutPanes, zoomCrop } from '@shared/geometry'
+import { faceXAt } from '@shared/faces'
+import { coverCrop, fitBox, layoutPanes, zoomCrop } from '@shared/geometry'
 import { cutsDuration, cutsOf, toOut } from '@shared/cuts'
 import { applyDictionary, buildCuesInCuts } from '@shared/subtitles'
 import { fmtDur } from '@shared/time'
@@ -54,8 +55,9 @@ export function Preview916(props: Props) {
   const t = player.time
 
   const panes = useMemo(() => layoutPanes(layout, split, width, height), [layout, split, width, height])
-  const state = useRef({ panes, crop, zoomAt, offset: player.offset })
-  state.current = { panes, crop, zoomAt, offset: player.offset }
+  const faces = clip?.faces ?? null
+  const state = useRef({ panes, crop, zoomAt, offset: player.offset, layout, faces })
+  state.current = { panes, crop, zoomAt, offset: player.offset, layout, faces }
 
   // desenha cada frame do vídeo no canvas
   useEffect(() => {
@@ -79,11 +81,33 @@ export function Preview916(props: Props) {
         ctx.fillRect(0, 0, width, height)
         const zoomTarget = s.panes.some((p) => p.kind === 'cam') ? 'cam' : 'game'
         const zoomOn = s.zoomAt != null && tSrc >= s.zoomAt - ZOOM.lead && tSrc <= s.zoomAt - ZOOM.lead + ZOOM.duration
-        for (const p of s.panes) {
-          const rect = p.kind === 'cam' ? s.crop.cam : s.crop.game
-          let c = coverCrop(rect, v.videoWidth, v.videoHeight, p.out.w / p.out.h)
-          if (zoomOn && p.kind === zoomTarget) c = zoomCrop(c, ZOOM.factor)
-          ctx.drawImage(v, c.x, c.y, c.w, c.h, p.out.x, p.out.y, p.out.w, p.out.h)
+        const vw = v.videoWidth
+        const vh = v.videoHeight
+        if (s.layout === 'fit') {
+          // vídeo inteiro: fundo ampliado e desfocado, quadro no meio (mesma conta do render)
+          const bg = coverCrop({ x: 0, y: 0, w: 1, h: 1 }, vw, vh, width / height)
+          ctx.save()
+          ctx.filter = 'blur(12px) brightness(0.8)'
+          ctx.drawImage(v, bg.x, bg.y, bg.w, bg.h, -12, -12, width + 24, height + 24)
+          ctx.restore()
+          const box = fitBox(vw, vh, width, height)
+          let c = { x: 0, y: 0, w: vw, h: vh }
+          if (zoomOn) c = zoomCrop(c, ZOOM.factor)
+          ctx.drawImage(v, c.x, c.y, c.w, c.h, box.x, box.y, box.w, box.h)
+        } else if (s.layout === 'face') {
+          // seguir quem fala: recorte 9:16 na altura toda, centrado no plano do momento
+          const cw = Math.min(vw, (vh * 9) / 16)
+          const cx = Math.max(0, Math.min(vw - cw, faceXAt(s.faces, tSrc) * vw - cw / 2))
+          let c = { x: cx, y: 0, w: cw, h: vh }
+          if (zoomOn) c = zoomCrop(c, ZOOM.factor)
+          ctx.drawImage(v, c.x, c.y, c.w, c.h, 0, 0, width, height)
+        } else {
+          for (const p of s.panes) {
+            const rect = p.kind === 'cam' ? s.crop.cam : s.crop.game
+            let c = coverCrop(rect, vw, vh, p.out.w / p.out.h)
+            if (zoomOn && p.kind === zoomTarget) c = zoomCrop(c, ZOOM.factor)
+            ctx.drawImage(v, c.x, c.y, c.w, c.h, p.out.x, p.out.y, p.out.w, p.out.h)
+          }
         }
       }
       handle = 'requestVideoFrameCallback' in v ? v.requestVideoFrameCallback(draw) : requestAnimationFrame(draw)
@@ -108,7 +132,7 @@ export function Preview916(props: Props) {
   useEffect(() => {
     const v = player.videoRef.current
     if (v && !player.playing && v.readyState >= 2) v.dispatchEvent(new Event('seeked'))
-  }, [layout, split, crop, player.playing, player.videoRef])
+  }, [layout, split, crop, faces, player.playing, player.videoRef])
 
   const cues = useMemo(() => {
     if (!clip) return []
@@ -180,8 +204,8 @@ export function Preview916(props: Props) {
         <div className="p916-placeholder" onClick={player.toggle}>
           {panes.map((p) => (
             <div key={p.kind} className={`p916-pane ${p.kind}`} style={{ top: p.out.y, height: p.out.h }}>
-              <Icon name={p.kind === 'cam' ? 'user' : 'crosshair'} size={48} strokeWidth={1.4} />
-              <span>{p.kind === 'cam' ? 'WEBCAM' : 'GAMEPLAY'}</span>
+              <Icon name={p.kind === 'cam' || layout === 'face' ? 'user' : 'crosshair'} size={48} strokeWidth={1.4} />
+              <span>{p.kind === 'cam' ? 'WEBCAM' : layout === 'face' ? 'QUEM FALA' : layout === 'fit' ? 'VÍDEO INTEIRO' : 'GAMEPLAY'}</span>
             </div>
           ))}
         </div>

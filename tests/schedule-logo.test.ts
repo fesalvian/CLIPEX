@@ -8,10 +8,12 @@ import type { Clip, StyleExample } from '@shared/types'
 const store = new Map<string, unknown>()
 vi.mock('electron', () => ({ app: { isPackaged: false, getAppPath: () => '', getPath: () => '' }, BrowserWindow: { getAllWindows: () => [] }, safeStorage: {}, shell: {} }))
 vi.mock('../src/main/db', () => ({
-  settingsRepo: { get: (k: string) => store.get(k) ?? null, set: (k: string, v: unknown) => store.set(k, v) }
+  settingsRepo: { get: (k: string) => store.get(k) ?? null, set: (k: string, v: unknown) => store.set(k, v) },
+  projectsRepo: { get: () => null }
 }))
+vi.mock('../src/main/profiles', () => ({ getProfile: () => ({ id: 'fesalvian', kind: 'gameplay' }), secretKey: (b: string) => b }))
 const style = { notes: 'escrevo tudo minúsculo, falo "chat"', avoid: 'épico, insano', learn: true, defaultGame: '' }
-vi.mock('../src/main/settings', () => ({ getSettings: () => ({ style, text: DEFAULT_TEXT }) }))
+vi.mock('../src/main/settings', () => ({ getSettings: () => ({ style, text: DEFAULT_TEXT }), activeProfileId: () => 'fesalvian' }))
 
 const { addExample, captionStyleBlock, hookStyleBlock, learnFromClip, listExamples } = await import('../src/main/style')
 const { parseCropdetect } = await import('../src/main/image')
@@ -119,7 +121,7 @@ describe('meu jeito de escrever', () => {
   it('exemplos e regras entram no prompt das legendas e dos ganchos', () => {
     addExample({ kind: 'caption', network: 'instagram', text: 'chat eu juro que ele tava atrás kkkk', hashtags: ['#valorant'], source: 'manual' })
     addExample({ kind: 'hook', network: null, text: 'ELE NÃO SABIA', hashtags: [], source: 'manual' })
-    const block = captionStyleBlock('Valorant')
+    const block = captionStyleBlock('fesalvian', 'Valorant')
     expect(block).toContain('Jogo da live: Valorant')
     expect(block).toContain('escrevo tudo minúsculo')
     expect(block).toContain('Nunca use estas palavras/expressões: épico, insano')
@@ -127,12 +129,12 @@ describe('meu jeito de escrever', () => {
     const p = captionsPrompt([{ w: 'oi', s: 0, e: 1 }], 0, 5, null, null, rules as never, { instagram: '@a', tiktok: '@b', youtube: '@c' }, block)
     expect(p.system).toContain(HUMAN_RULES)
     expect(p.system).toContain('chat eu juro')
-    const h = hooksPrompt([{ w: 'oi', s: 0, e: 1 }], 0, 5, [], hookStyleBlock(null))
+    const h = hooksPrompt([{ w: 'oi', s: 0, e: 1 }], 0, 5, [], hookStyleBlock('fesalvian', null))
     expect(h.system).toContain('ELE NÃO SABIA')
   })
 
   it('sem jogo informado, manda não chutar o jogo', () => {
-    expect(captionStyleBlock(null)).toContain('não chute o nome do jogo')
+    expect(captionStyleBlock('fesalvian', null)).toContain('não chute o nome do jogo')
   })
 
   it('aprende com o que foi postado, sem duplicar', () => {

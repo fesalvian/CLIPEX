@@ -12,12 +12,12 @@ import { NETWORKS, type Clip } from '@shared/types'
 import { clipName } from './clips'
 import { clipsRepo, projectsRepo } from './db'
 import { ensureRendered, outputName } from './render/queue'
-import { getSettings, platformRules } from './settings'
+import { platformRules, projectSettings } from './settings'
 import { learnFromClip } from './style'
 
 export function captionsTxt(c: Clip): string {
   const rules = platformRules()
-  const acc = getSettings().accounts
+  const acc = projectSettings(c.projectId).accounts
   const handle = { instagram: acc.instagram, tiktok: acc.tiktok, youtube: acc.youtube }
   const lines = [`${clipName(c)}${c.llm?.title ? ` — ${c.llm.title}` : ''}`, `Duração: ${fmtDur(clipDuration(c))}`, '']
   for (const net of NETWORKS) {

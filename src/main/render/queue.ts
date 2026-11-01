@@ -10,9 +10,10 @@ import { ffmpegPath, videoEncoder } from '../components'
 import { clipsRepo, projectsRepo } from '../db'
 import { renderArgs, type RenderConfig } from '../ffmpeg/args'
 import { renderTracks } from '../ffmpeg/probe'
+import { ensureFaces } from '../faces'
 import { ensureDir } from '../paths'
 import { CanceledError, ffmpegProgress, runProcess, type RunHandle } from '../proc'
-import { getSettings } from '../settings'
+import { projectSettings } from '../settings'
 import { buildAss } from './ass'
 import type { Clip } from '@shared/types'
 
@@ -142,7 +143,9 @@ function copyFonts(dir: string, families: string[]): void {
 export async function buildRenderConfig(clip: Clip, workDir: string, out: string): Promise<RenderConfig> {
   const p = projectsRepo.get(clip.projectId)
   if (!p?.source) throw new Error('Projeto sem informações do arquivo.')
-  const s = getSettings()
+  const s = projectSettings(p.id)
+  // câmera seguindo quem fala: calcula os planos se ainda não cobrem o corte (sem eles, centro)
+  if (clip.layout === 'face') clip = (await ensureFaces(clip.id).catch(() => null)) ?? clip
   const cues = clip.cues ?? rebuildCues(clip) ?? []
   const caption = captionStyleFor(clip, s.text)
   const hookStyle = hookStyleFor(clip, s.text)
@@ -189,6 +192,7 @@ export async function buildRenderConfig(clip: Clip, workDir: string, out: string
     camSplit: clip.camSplit,
     crop: clip.crop ?? p.crop,
     zoom,
+    faces: clip.faces,
     subtitles: 'sub.ass',
     fontsDir: 'fonts',
     watermark,

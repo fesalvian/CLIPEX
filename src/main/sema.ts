@@ -42,5 +42,7 @@ export const whisperLane = new Semaphore(1)
 export const previewLane = new Semaphore(1)
 /** Proxy da live inteira: fila própria, senão segura os previews por dezenas de minutos. */
 export const proxyLane = new Semaphore(1)
+/** Detecção de rosto (câmera seguindo quem fala). */
+export const facesLane = new Semaphore(1)
 /** Chamadas de LLM em paralelo. */
 export const llmLane = new Semaphore(2)

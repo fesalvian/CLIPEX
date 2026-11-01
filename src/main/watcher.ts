@@ -1,5 +1,5 @@
 // Pasta vigiada: quando um vídeo novo para de crescer (o OBS terminou de gravar),
-// cria o projeto e começa a análise sozinho.
+// cria o projeto e começa a análise sozinho. Cada perfil pode vigiar a própria pasta.
 
 import { existsSync, mkdirSync, openSync, closeSync, readdirSync, statSync } from 'node:fs'
 import { extname, join } from 'node:path'
@@ -7,6 +7,7 @@ import type { WatcherStatus } from '@shared/types'
 import { emit, toast } from './bus'
 import { projectsRepo } from './db'
 import { enqueueAnalysis } from './pipeline'
+import { listProfiles } from './profiles'
 import { createProject } from './projects'
 import { getSettings, watchSince } from './settings'
 
@@ -54,24 +55,32 @@ function publish(): void {
 }
 
 function scan(): void {
-  const s = getSettings()
-  if (!s.watchEnabled || !existsSync(s.watchFolder)) {
-    seen.clear()
-    publish()
-    return
+  const present = new Set<string>()
+  const folders = new Set<string>()
+  for (const profile of listProfiles()) {
+    const s = getSettings(profile.id)
+    // a mesma pasta em dois perfis: fica com o primeiro
+    const key = s.watchFolder.toLowerCase()
+    if (!s.watchEnabled || folders.has(key) || !existsSync(s.watchFolder)) continue
+    folders.add(key)
+    scanFolder(s.watchFolder, profile.id, profile.autoPost.enabled, present)
   }
+  for (const k of seen.keys()) if (!present.has(k)) seen.delete(k)
+  publish()
+}
+
+function scanFolder(folder: string, profileId: string, auto: boolean, present: Set<string>): void {
   const since = watchSince()
   let names: string[] = []
   try {
-    names = readdirSync(s.watchFolder)
+    names = readdirSync(folder)
   } catch {
     return
   }
   const now = Date.now()
-  const present = new Set<string>()
   for (const name of names) {
     if (!VIDEO_EXT.has(extname(name).toLowerCase())) continue
-    const path = join(s.watchFolder, name)
+    const path = join(folder, name)
     let st
     try {
       st = statSync(path)
@@ -89,7 +98,7 @@ function scan(): void {
     if (now - prev.since >= STABLE_MS && st.size > 0 && isUnlocked(path)) {
       seen.delete(path)
       try {
-        const p = createProject(path)
+        const p = createProject(path, { profileId, auto })
         enqueueAnalysis(p.id)
         toast('info', `Nova gravação: ${p.name}. Análise começou.`)
       } catch (e) {
@@ -97,13 +106,12 @@ function scan(): void {
       }
     }
   }
-  for (const k of seen.keys()) if (!present.has(k)) seen.delete(k)
-  publish()
 }
 
 export function startWatcher(): void {
-  const s = getSettings()
-  if (s.watchEnabled && !existsSync(s.watchFolder)) {
+  for (const profile of listProfiles()) {
+    const s = getSettings(profile.id)
+    if (!s.watchEnabled || existsSync(s.watchFolder)) continue
     try {
       mkdirSync(s.watchFolder, { recursive: true })
     } catch {

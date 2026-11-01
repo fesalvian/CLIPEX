@@ -1,11 +1,12 @@
 import { create } from 'zustand'
 import type { ClipPatch } from '@shared/ipc'
 import { clipSubtitle, clipTitle, DEFAULT_TEXT } from '@shared/text'
-import type { Clip, ComponentStatus, FontInfo, Post, Project, ProjectSummary, Settings, WatcherStatus } from '@shared/types'
+import type { Clip, ComponentStatus, FontInfo, Post, Profile, Project, ProjectSummary, Settings, SourceStatus, WatcherStatus } from '@shared/types'
 import { call, errorText } from './api'
 import { loadFontFaces } from './lib/fonts'
 
 export type Route =
+  | { name: 'profiles' }
   | { name: 'home'; focus?: string }
   | { name: 'settings' }
   | { name: 'posts' }
@@ -20,6 +21,10 @@ export interface Toast {
 
 interface State {
   route: Route
+  profiles: Profile[]
+  activeProfileId: string
+  /** canal vigiado do perfil ativo */
+  source: SourceStatus | null
   projects: ProjectSummary[]
   project: Project | null
   clips: Record<string, Clip>
@@ -33,6 +38,8 @@ interface State {
   fonts: FontInfo[]
 
   go: (r: Route) => void
+  /** troca de perfil: recarrega projetos, configurações e canal vigiado */
+  selectProfile: (id: string) => Promise<void>
   openProject: (id: string, screen: 'clipar' | 'revisar') => Promise<void>
   setProject: (p: Project) => void
   upsertClip: (c: Clip) => void
@@ -63,6 +70,9 @@ export interface LiveWave {
 
 export const useStore = create<State>((set, get) => ({
   route: { name: 'home' },
+  profiles: [],
+  activeProfileId: '',
+  source: null,
   projects: [],
   project: null,
   clips: {},
@@ -75,6 +85,18 @@ export const useStore = create<State>((set, get) => ({
   fonts: [],
 
   go: (route) => set({ route }),
+
+  selectProfile: async (id) => {
+    const p = await call('profiles:select', id)
+    set({ activeProfileId: p.id, project: null, clips: {}, posts: [], liveWave: null })
+    const [projects, settings, watcher, source] = await Promise.all([
+      call('projects:list'),
+      call('settings:get'),
+      call('watcher:status'),
+      call('sources:status')
+    ])
+    set({ projects, settings, watcher, source, route: { name: 'home' } })
+  },
 
   openProject: async (id, screen) => {
     const cur = get().project
@@ -192,4 +214,9 @@ export function clipFullName(c: Clip): string {
 /** Nota mostrada na lista: a da IA quando existe, senão a força do sinal. */
 export function clipScore(c: Clip): number {
   return c.llm ? c.llm.score : Math.round(c.signalScore * 100)
+}
+
+/** Perfil ativo (o que as telas mostram). */
+export function useActiveProfile(): Profile | null {
+  return useStore((s) => s.profiles.find((p) => p.id === s.activeProfileId) ?? null)
 }
